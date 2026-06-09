@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "name": "Sincronizar documentación",
+  "description": "Cuando cambian las Lambdas, el template CloudFormation o el frontend, revisa y actualiza la documentación en docs/ y el README para que refleje el estado real del sistema.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "lambdas/**/*.py",
+      "datamask-template.yaml",
+      "frontend/src/**/*.tsx",
+      "frontend/src/**/*.ts"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Un archivo de código o infraestructura cambió. Revisá si la documentación en docs/ (flujo-aplicacion-aws.md, howtodeploydatamask.md, autenticacion.md, algoritmos-ofuscacion.md, pricing-estimado.md, security-assessment.md) y el README.md siguen siendo correctos respecto al cambio. Si algo quedó desactualizado (endpoints, servicios usados, flujo, parámetros del template, motores de detección, costos, controles de seguridad), actualizá SOLO las secciones afectadas para que reflejen el estado real. No reescribas documentos enteros si no es necesario. Si la documentación ya es correcta, no hagas cambios. Respondé en español."
+  }
+}

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   Container,
   Header,
@@ -9,14 +9,22 @@ import {
   Flashbar,
   Tabs,
   Icon,
+  Badge,
+  Modal,
 } from '@cloudscape-design/components';
+import authApi from '../services/authApi';
 
-interface OutputFile {
+/* ─── Tipos ─────────────────────────────────────────────────────────── */
+
+interface S3Object {
+  key: string;
   name: string;
-  size_bytes: number;
-  path: string;
-  folder: string;
+  size: number;
+  lastModified: string;
+  isFolder: boolean;
 }
+
+/* ─── Utilidades ────────────────────────────────────────────────────── */
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -24,108 +32,164 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-const OutputPage: React.FC = () => {
-  const [pdfFiles, setPdfFiles] = useState<OutputFile[]>([]);
-  const [mdFiles, setMdFiles] = useState<OutputFile[]>([]);
-  const [selectedPdf, setSelectedPdf] = useState<OutputFile[]>([]);
-  const [selectedMd, setSelectedMd] = useState<OutputFile[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [flashMessages, setFlashMessages] = useState<Array<{
-    type: 'success' | 'error';
-    content: string;
-    id: string;
-    dismissible: boolean;
-  }>>([]);
+function formatDate(dateStr: string): string {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr);
+  return d.toLocaleString('es-AR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
 
-  const fetchFiles = async () => {
+/* ─── Componente ────────────────────────────────────────────────────── */
+
+const OutputPage: React.FC = () => {
+  const [pdfFiles, setPdfFiles] = useState<S3Object[]>([]);
+  const [mdFiles, setMdFiles] = useState<S3Object[]>([]);
+  const [bucketName, setBucketName] = useState<string>('');
+  const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const [toDelete, setToDelete] = useState<S3Object | null>(null);
+  const [purging, setPurging] = useState(false);
+  const [showPurgeConfirm, setShowPurgeConfirm] = useState(false);
+  const [flashMessages, setFlashMessages] = useState<
+    Array<{ type: 'success' | 'error'; content: string; id: string; dismissible: boolean }>
+  >([]);
+
+  /* ─── Cargar archivos ofuscados desde S3 ────────────────────────── */
+
+  const fetchFiles = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch('/api/output/files?folder=all');
-      const data = await response.json();
-      setPdfFiles(data.files.filter((f: OutputFile) => f.folder === 'ofuscados'));
-      setMdFiles(data.files.filter((f: OutputFile) => f.folder === 'ofuscados_md'));
+      const response = await authApi.get('/documents/s3/list', {
+        params: { prefix: 'ofuscados/' },
+      });
+      const data = response.data;
+      setBucketName(data.bucket);
+
+      const objects: S3Object[] = data.objects || [];
+      // Separar PDFs ofuscados de los informes Markdown
+      setPdfFiles(objects.filter((f) => f.name.toLowerCase().endsWith('.pdf')));
+      setMdFiles(objects.filter((f) => f.name.toLowerCase().endsWith('.md')));
     } catch {
-      setFlashMessages([{
-        type: 'error',
-        content: 'Error al cargar archivos.',
-        id: 'load-err',
-        dismissible: true,
-      }]);
+      setFlashMessages([
+        {
+          type: 'error',
+          content: 'Error al cargar los archivos ofuscados.',
+          id: `load-err-${Date.now()}`,
+          dismissible: true,
+        },
+      ]);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  useEffect(() => { fetchFiles(); }, []);
+  useEffect(() => {
+    fetchFiles();
+  }, [fetchFiles]);
 
-  const handleDelete = async (files: OutputFile[], folder: string) => {
+  /* ─── Descargar archivo (presigned URL) ─────────────────────────── */
+
+  const handleDownload = async (item: S3Object) => {
     try {
-      const response = await fetch('/api/output/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: files.map(f => f.name), folder }),
+      const response = await authApi.get('/documents/s3/download', {
+        params: { key: item.key },
       });
-      const data = await response.json();
-      setFlashMessages([{
-        type: 'success',
-        content: `${data.deleted} archivo(s) eliminado(s).`,
-        id: `del-${Date.now()}`,
-        dismissible: true,
-      }]);
-      setSelectedPdf([]);
-      setSelectedMd([]);
-      fetchFiles();
+      const url = response.data.url;
+      window.open(url, '_blank');
     } catch {
-      setFlashMessages([{
-        type: 'error',
-        content: 'Error al eliminar archivos.',
-        id: `del-err-${Date.now()}`,
-        dismissible: true,
-      }]);
+      setFlashMessages([
+        {
+          type: 'error',
+          content: `No se pudo descargar "${item.name}".`,
+          id: `dl-err-${Date.now()}`,
+          dismissible: true,
+        },
+      ]);
     }
   };
 
-  const handleDeleteAll = async (folder: string) => {
+  /* ─── Eliminar archivo de S3 ─────────────────────────────────────── */
+
+  const handleConfirmDelete = async () => {
+    if (!toDelete) return;
+    setDeleting(true);
     try {
-      const response = await fetch(`/api/output/delete-all?folder=${folder}`, { method: 'POST' });
-      const data = await response.json();
-      setFlashMessages([{
-        type: 'success',
-        content: `${data.deleted} archivo(s) eliminado(s).`,
-        id: `delall-${Date.now()}`,
-        dismissible: true,
-      }]);
-      setSelectedPdf([]);
-      setSelectedMd([]);
-      fetchFiles();
+      await authApi.delete('/documents/s3/object', {
+        params: { key: toDelete.key },
+      });
+      setFlashMessages([
+        {
+          type: 'success',
+          content: `Se eliminó "${toDelete.name}".`,
+          id: `del-ok-${Date.now()}`,
+          dismissible: true,
+        },
+      ]);
+      setToDelete(null);
+      await fetchFiles();
     } catch {
-      setFlashMessages([{
-        type: 'error',
-        content: 'Error al eliminar archivos.',
-        id: `delall-err-${Date.now()}`,
-        dismissible: true,
-      }]);
+      setFlashMessages([
+        {
+          type: 'error',
+          content: `No se pudo eliminar "${toDelete.name}".`,
+          id: `del-err-${Date.now()}`,
+          dismissible: true,
+        },
+      ]);
+    } finally {
+      setDeleting(false);
     }
   };
 
-  const renderTable = (
-    files: OutputFile[],
-    selected: OutputFile[],
-    setSelected: (items: OutputFile[]) => void,
-    folder: string,
-  ) => (
+  /* ─── Borrar todos los ofuscados ─────────────────────────────────── */
+
+  const handlePurgeObfuscated = async () => {
+    setPurging(true);
+    try {
+      const response = await authApi.post('/documents/purge', { scope: 'obfuscated' });
+      const obf = response.data.deletedObfuscated ?? 0;
+      const proc = response.data.deletedProcessing ?? 0;
+      setFlashMessages([
+        {
+          type: 'success',
+          content: `Se eliminaron ${obf} archivo(s) ofuscado(s) y ${proc} intermedio(s). Los originales y la auditoría se conservan.`,
+          id: `purge-ok-${Date.now()}`,
+          dismissible: true,
+        },
+      ]);
+      await fetchFiles();
+    } catch {
+      setFlashMessages([
+        {
+          type: 'error',
+          content: 'No se pudieron eliminar los archivos ofuscados.',
+          id: `purge-err-${Date.now()}`,
+          dismissible: true,
+        },
+      ]);
+    } finally {
+      setPurging(false);
+      setShowPurgeConfirm(false);
+    }
+  };
+
+  /* ─── Tabla ─────────────────────────────────────────────────────── */
+
+  const renderTable = (files: S3Object[], typeLabel: string, badgeColor: 'green' | 'blue') => (
     <Table
       loading={loading}
       loadingText="Cargando..."
-      selectionType="multi"
-      selectedItems={selected}
-      onSelectionChange={({ detail }) => setSelected(detail.selectedItems as OutputFile[])}
-      trackBy="name"
+      trackBy="key"
       empty={
         <Box textAlign="center" color="inherit" padding="l">
           <b>Sin archivos</b>
           <Box variant="p" color="inherit">
-            No hay archivos ofuscados en esta carpeta.
+            No hay archivos ofuscados todavía. Procesá documentos desde “Documentos en S3”.
           </Box>
         </Box>
       }
@@ -133,23 +197,9 @@ const OutputPage: React.FC = () => {
         <Header
           counter={`(${files.length})`}
           actions={
-            <SpaceBetween size="xs" direction="horizontal">
-              <Button
-                disabled={selected.length === 0}
-                onClick={() => handleDelete(selected, folder)}
-              >
-                Eliminar seleccionados ({selected.length})
-              </Button>
-              <Button
-                disabled={files.length === 0}
-                onClick={() => handleDeleteAll(folder)}
-              >
-                Eliminar todos
-              </Button>
-              <Button iconName="refresh" onClick={fetchFiles}>
-                Actualizar
-              </Button>
-            </SpaceBetween>
+            <Button iconName="refresh" onClick={fetchFiles} loading={loading}>
+              Actualizar
+            </Button>
           }
         >
           Archivos
@@ -157,48 +207,42 @@ const OutputPage: React.FC = () => {
       }
       columnDefinitions={[
         {
-          id: 'icon',
-          header: '',
-          width: 40,
-          cell: (item: OutputFile) => (
-            <Icon name={item.name.endsWith('.md') ? 'file' : 'file'} />
-          ),
-        },
-        {
           id: 'name',
           header: 'Nombre',
-          cell: (item: OutputFile) => (
-            <Button
-              variant="link"
-              onClick={() => {
-                const url = `/api/output/view/${item.folder}/${item.name}`;
-                window.open(url, '_blank');
-              }}
-            >
-              {item.name}
+          minWidth: 400,
+          cell: (item: S3Object) => (
+            <Button variant="link" onClick={() => handleDownload(item)}>
+              <Icon name="file" /> {item.name}
             </Button>
           ),
           sortingField: 'name',
         },
         {
+          id: 'type',
+          header: 'Tipo',
+          width: 110,
+          cell: () => <Badge color={badgeColor}>{typeLabel}</Badge>,
+        },
+        {
           id: 'size',
           header: 'Tamaño',
           width: 120,
-          cell: (item: OutputFile) => formatFileSize(item.size_bytes),
+          cell: (item: S3Object) => formatFileSize(item.size),
+        },
+        {
+          id: 'lastModified',
+          header: 'Generado',
+          cell: (item: S3Object) => formatDate(item.lastModified),
         },
         {
           id: 'actions',
           header: 'Acciones',
-          width: 100,
-          cell: (item: OutputFile) => (
-            <Button
-              variant="icon"
-              iconName="external"
-              onClick={() => {
-                const url = `/api/output/view/${item.folder}/${item.name}`;
-                window.open(url, '_blank');
-              }}
-            />
+          width: 160,
+          cell: (item: S3Object) => (
+            <SpaceBetween size="xs" direction="horizontal">
+              <Button variant="icon" iconName="download" onClick={() => handleDownload(item)} />
+              <Button variant="icon" iconName="remove" onClick={() => setToDelete(item)} />
+            </SpaceBetween>
           ),
         },
       ]}
@@ -210,17 +254,30 @@ const OutputPage: React.FC = () => {
   return (
     <SpaceBetween size="l">
       {flashMessages.length > 0 && (
-        <Flashbar items={flashMessages.map(msg => ({
-          ...msg,
-          onDismiss: () => setFlashMessages(prev => prev.filter(m => m.id !== msg.id)),
-        }))} />
+        <Flashbar
+          items={flashMessages.map((msg) => ({
+            ...msg,
+            onDismiss: () => setFlashMessages((prev) => prev.filter((m) => m.id !== msg.id)),
+          }))}
+        />
       )}
 
       <Container
         header={
           <Header
             variant="h1"
-            description="Explore y gestione los archivos ofuscados generados (PDF y Markdown)."
+            description="Explore y descargue los archivos ofuscados generados (PDF y Markdown)."
+            info={bucketName ? <Badge color="blue">{bucketName}</Badge> : undefined}
+            actions={
+              <Button
+                iconName="remove"
+                onClick={() => setShowPurgeConfirm(true)}
+                loading={purging}
+                disabled={pdfFiles.length === 0 && mdFiles.length === 0}
+              >
+                Borrar todos los ofuscados
+              </Button>
+            }
           >
             Archivos ofuscados
           </Header>
@@ -230,17 +287,70 @@ const OutputPage: React.FC = () => {
           tabs={[
             {
               id: 'pdf',
-              label: `PDF y Word ofuscados (${pdfFiles.length})`,
-              content: renderTable(pdfFiles, selectedPdf, setSelectedPdf, 'ofuscados'),
+              label: `PDF ofuscados (${pdfFiles.length})`,
+              content: renderTable(pdfFiles, 'PDF', 'green'),
             },
             {
               id: 'md',
-              label: `Markdown ofuscados (${mdFiles.length})`,
-              content: renderTable(mdFiles, selectedMd, setSelectedMd, 'ofuscados_md'),
+              label: `Informes Markdown (${mdFiles.length})`,
+              content: renderTable(mdFiles, 'Markdown', 'blue'),
             },
           ]}
         />
       </Container>
+
+      <Modal
+        visible={toDelete !== null}
+        onDismiss={() => setToDelete(null)}
+        header="Eliminar archivo"
+        footer={
+          <Box float="right">
+            <SpaceBetween size="xs" direction="horizontal">
+              <Button variant="link" onClick={() => setToDelete(null)} disabled={deleting}>
+                Cancelar
+              </Button>
+              <Button variant="primary" onClick={handleConfirmDelete} loading={deleting}>
+                Eliminar
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+      >
+        {toDelete && (
+          <Box>
+            ¿Seguro que desea eliminar “{toDelete.name}”? Esta acción no se puede deshacer.
+          </Box>
+        )}
+      </Modal>
+
+      <Modal
+        visible={showPurgeConfirm}
+        onDismiss={() => setShowPurgeConfirm(false)}
+        header="Borrar todos los archivos ofuscados"
+        footer={
+          <Box float="right">
+            <SpaceBetween size="xs" direction="horizontal">
+              <Button variant="link" onClick={() => setShowPurgeConfirm(false)} disabled={purging}>
+                Cancelar
+              </Button>
+              <Button variant="primary" onClick={handlePurgeObfuscated} loading={purging}>
+                Borrar todo
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+      >
+        <SpaceBetween size="s">
+          <Box>
+            Se eliminarán <b>todos</b> los PDF ofuscados e informes Markdown de tu
+            usuario (carpeta <code>ofuscados/</code>) y los artefactos intermedios.
+          </Box>
+          <Box color="text-status-info">
+            Los documentos <b>originales</b> y el registro de auditoría se conservan.
+            Esta acción no se puede deshacer.
+          </Box>
+        </SpaceBetween>
+      </Modal>
     </SpaceBetween>
   );
 };

@@ -28,32 +28,25 @@ const HelpPage: React.FC = () => {
                 Siga estos pasos para procesar sus documentos:
               </Box>
               <Box variant="p">
-                <strong>1.</strong> Vaya a la sección "Procesamiento" en el menú lateral.
+                <strong>1.</strong> Inicie sesión con IAM Identity Center desde la pantalla de login (vía Amazon Cognito).
               </Box>
               <Box variant="p">
-                <strong>2.</strong> Ingrese la ruta de la carpeta que contiene los documentos a procesar, o use el botón "Explorar" para navegar el sistema de archivos.
+                <strong>2.</strong> Vaya a la sección “Documentos a enmascarar” en el menú lateral.
               </Box>
               <Box variant="p">
-                <strong>3.</strong> Haga clic en "Validar carpeta" para listar los documentos encontrados.
+                <strong>3.</strong> Suba uno o varios documentos. Se cargan directamente a S3 mediante URLs prefirmadas.
               </Box>
               <Box variant="p">
-                <strong>4.</strong> Seleccione los archivos que desea procesar (o procese todos).
+                <strong>4.</strong> Seleccione los documentos en la carpeta “originales/” y presione procesar. El pipeline serverless los procesa automáticamente (Textract → IA Bedrock + reglas regex → redacción).
               </Box>
               <Box variant="p">
-                <strong>5.</strong> Haga clic en "Iniciar procesamiento". El progreso se mostrará en tiempo real.
+                <strong>5.</strong> Siga el estado de cada documento (UPLOADED → PROCESSING → COMPLETED) en la lista.
               </Box>
               <Box variant="p">
-                <strong>6.</strong> Los archivos ofuscados se guardarán en la carpeta <code>ofuscados/</code> y las versiones Markdown en <code>ofuscados_md/</code>.
+                <strong>6.</strong> Descargue los documentos ofuscados desde la sección “Archivos ofuscados”.
               </Box>
               <Box variant="p">
-                <strong>7.</strong> Revise los resultados en la sección "Archivos ofuscados" y el historial en "Registros de Auditoría".
-              </Box>
-              <Box variant="h4">Iniciar y detener la aplicación</Box>
-              <Box variant="p">
-                <strong>Iniciar:</strong> Ejecute <code>./run.sh</code> (macOS) o <code>run.bat</code> (Windows) desde el directorio del proyecto.
-              </Box>
-              <Box variant="p">
-                <strong>Detener:</strong> Ejecute <code>./stop.sh</code> (macOS) o <code>stop.bat</code> (Windows), o presione <code>Ctrl+C</code> en la terminal donde se ejecuta el servidor.
+                <strong>7.</strong> Revise el historial en “Registros de Auditoría”. En “Configuración” ajuste el modelo de IA, la temperatura, el prompt y las reglas regex.
               </Box>
             </SpaceBetween>
           </ExpandableSection>
@@ -82,16 +75,6 @@ const HelpPage: React.FC = () => {
                   format: 'PDF',
                   extension: '.pdf',
                   description: 'Documentos PDF. Se aplican redacciones visuales preservando el formato original.',
-                },
-                {
-                  format: 'Markdown',
-                  extension: '.md',
-                  description: 'Archivos de texto con formato Markdown. Se reemplazan los datos sensibles con etiquetas.',
-                },
-                {
-                  format: 'Microsoft Word',
-                  extension: '.docx',
-                  description: 'Documentos Word (formato Open XML). Se reemplazan los datos sensibles en los párrafos.',
                 },
               ]}
               variant="embedded"
@@ -138,25 +121,16 @@ const HelpPage: React.FC = () => {
           <ExpandableSection headerText="Restricciones y limitaciones">
             <SpaceBetween size="s">
               <Box variant="p">
-                • El procesamiento es 100% local, no se envían datos a internet.
-              </Box>
-              <Box variant="p">
-                • Los archivos Word (.docx) protegidos con contraseña no pueden procesarse.
+                • El procesamiento corre en la nube AWS de su organización (Textract, Bedrock); los documentos no salen de su cuenta.
               </Box>
               <Box variant="p">
                 • Los PDFs protegidos con contraseña se omiten.
               </Box>
               <Box variant="p">
-                • El modelo NER puede no detectar todos los datos sensibles (precisión ~85-95%).
+                • La detección de PII puede no capturar todos los datos sensibles (precisión ~85-95%).
               </Box>
               <Box variant="p">
-                • Archivos muy grandes (&gt;50MB) pueden tardar varios minutos.
-              </Box>
-              <Box variant="p">
-                • Se requiere ~2GB de espacio en disco para el modelo de IA.
-              </Box>
-              <Box variant="p">
-                • Solo se procesan archivos en el nivel superior de la carpeta (no subcarpetas).
+                • Archivos muy grandes (&gt;50MB) pueden tardar varios minutos en procesarse.
               </Box>
             </SpaceBetween>
           </ExpandableSection>
@@ -164,49 +138,31 @@ const HelpPage: React.FC = () => {
           <ExpandableSection headerText="Seguridad y riesgos">
             <SpaceBetween size="s">
               <Box variant="p">
-                <strong>Modelo de seguridad:</strong> DataMask está diseñado para ejecutarse exclusivamente en localhost (127.0.0.1). No es accesible desde otros dispositivos en la red.
+                <strong>Autenticación:</strong> el acceso se realiza con Amazon Cognito federado con AWS IAM Identity Center (SAML). Si su organización federa con Active Directory, se usan sus credenciales corporativas. Cada llamada al API se autoriza con el id token (JWT) de Cognito.
               </Box>
               <Box variant="h4">Riesgos conocidos</Box>
               <Box variant="p">
-                • <strong>Acceso al sistema de archivos:</strong> La aplicación puede navegar y procesar archivos de cualquier ubicación del disco local. No restringe el acceso a directorios específicos. Esto es por diseño para flexibilidad, pero significa que cualquier persona con acceso al navegador en la máquina puede explorar el filesystem.
+                • <strong>Logs con nombres de archivo:</strong> el registro de auditoría almacena los nombres de los archivos procesados. Si los nombres contienen información sensible (ej: “CV-Juan-Perez.pdf”), queda registrada en el log.
               </Box>
               <Box variant="p">
-                • <strong>Sin autenticación:</strong> No se requiere usuario ni contraseña para acceder a la aplicación. Si alguien tiene acceso físico o remoto a su máquina, puede usar DataMask sin restricciones.
+                • <strong>Documentos ofuscados retienen contenido parcial:</strong> solo se reemplazan los datos sensibles detectados; el resto del texto se conserva. La precisión es del 85-95%, por lo que algún dato podría no detectarse.
+              </Box>
+              <Box variant="h4">Mitigaciones</Box>
+              <Box variant="p">
+                • Cifrado at-rest con KMS y in-transit con TLS 1.2+.
               </Box>
               <Box variant="p">
-                • <strong>Logs con nombres de archivo:</strong> El registro de auditoría almacena los nombres completos de los archivos procesados. Si los nombres contienen información sensible (ej: "CV-Juan-Perez.pdf"), esta información queda registrada en el log.
+                • El API solo acepta requests con un id token (JWT) válido de Cognito; cada usuario solo ve sus propios documentos.
               </Box>
               <Box variant="p">
-                • <strong>Archivos ofuscados retienen contenido parcial:</strong> Los documentos ofuscados aún contienen la mayor parte del texto original — solo los datos sensibles detectados son reemplazados. El modelo NER tiene una precisión del 85-95%, por lo que algunos datos podrían no ser detectados.
-              </Box>
-              <Box variant="p">
-                • <strong>Patrones regex personalizados:</strong> Si agrega patrones regex complejos en la configuración, un patrón mal formado podría causar lentitud en el procesamiento (ReDoS).
-              </Box>
-              <Box variant="h4">Mitigaciones implementadas</Box>
-              <Box variant="p">
-                • El servidor solo escucha en 127.0.0.1 (no accesible desde la red).
-              </Box>
-              <Box variant="p">
-                • Los endpoints de borrado validan que los archivos estén dentro de las carpetas permitidas (protección contra path traversal).
-              </Box>
-              <Box variant="p">
-                • No se realizan conexiones a internet durante el procesamiento.
-              </Box>
-              <Box variant="p">
-                • Los archivos originales nunca se modifican.
+                • Los buckets S3 tienen Block Public Access; los originales nunca se modifican.
               </Box>
               <Box variant="h4">Recomendaciones</Box>
               <Box variant="p">
-                • No deje la aplicación corriendo cuando no la esté usando.
+                • Revise los documentos ofuscados antes de compartirlos para verificar que todos los datos sensibles fueron detectados.
               </Box>
               <Box variant="p">
-                • Revise los archivos ofuscados antes de compartirlos para verificar que todos los datos sensibles fueron detectados.
-              </Box>
-              <Box variant="p">
-                • Borre los archivos ofuscados y logs cuando ya no los necesite (use la sección "Archivos ofuscados").
-              </Box>
-              <Box variant="p">
-                • Si necesita exponer la aplicación a la red, configure autenticación adicional a nivel de red (VPN, firewall).
+                • Cierre sesión al terminar, especialmente en equipos compartidos.
               </Box>
             </SpaceBetween>
           </ExpandableSection>
@@ -214,12 +170,12 @@ const HelpPage: React.FC = () => {
           <ExpandableSection headerText="Acerca de">
             <SpaceBetween size="s">
               <Box variant="p">
-                <strong>DataMask v1.0</strong>
+                <strong>DataMask AWS v2.0</strong>
               </Box>
               <Box variant="p">
-                Herramienta de enmascaramiento de datos sensibles en documentos.
-                Utiliza procesamiento de lenguaje natural (NER) con spaCy para
-                detectar y ofuscar información personal identificable (PII).
+                Solución serverless para enmascarar datos sensibles (PII) en documentos.
+                Combina Amazon Textract, Amazon Bedrock (IA) y patrones
+                regex para detectar y ofuscar información personal identificable.
               </Box>
               <Box variant="p">
                 Desarrollado por <strong>EduTheCoder</strong>.

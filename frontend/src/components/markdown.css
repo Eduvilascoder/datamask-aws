@@ -1,0 +1,35 @@
+/* Estilos del preview de Markdown en la sección Documentación. */
+
+.markdown-preview {
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.markdown-preview-table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.markdown-preview-table th,
+.markdown-preview-table td {
+  border: 1px solid #e9ebed;
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-preview-table th {
+  background: #f4f4f4;
+  font-weight: 700;
+}
+
+.markdown-preview pre {
+  white-space: pre;
+}
+
+.markdown-preview img {
+  max-width: 100%;
+  height: auto;
+}

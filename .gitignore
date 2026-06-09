@@ -1,5 +1,4 @@
 # Python
-venv/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,6 +8,26 @@ __pycache__/
 dist/
 build/
 .eggs/
+
+# Dependencias Python vendorizadas dentro de las Lambdas (se instalan en build,
+# NO se commitean — solo el código fuente .py de cada Lambda).
+lambdas/*/bin/
+lambdas/*/*.dist-info/
+lambdas/api/boto3/
+lambdas/api/botocore/
+lambdas/api/dateutil/
+lambdas/api/jmespath/
+lambdas/api/s3transfer/
+lambdas/api/urllib3/
+lambdas/api/six.py
+lambdas/*/idna/
+lambdas/*/certifi/
+lambdas/*/charset_normalizer/
+lambdas/*/requests/
+lambdas/*/pypdf/
+lambdas/*/fitz/
+lambdas/*/pymupdf/
+lambdas/*/PyMuPDF*/
 
 # Node
 frontend/node_modules/
@@ -23,17 +42,9 @@ node/
 *.swo
 .DS_Store
 
-# App runtime data
-log/audit.jsonl
-ofuscados/
-ofuscados_md/
-
 # Environment
 .env
 .env.local
-
-# Models (too large for git — downloaded by setup script)
-models/
 
 # OS
 Thumbs.db

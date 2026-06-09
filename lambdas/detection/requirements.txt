@@ -1,0 +1,4 @@
+# Lambda Detection dependencies
+# boto3 is provided by Lambda runtime, pinned for local dev/testing
+boto3>=1.34.0
+botocore>=1.34.0

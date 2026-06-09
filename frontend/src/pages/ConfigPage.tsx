@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   Container,
   Header,
@@ -7,440 +7,429 @@ import {
   Alert,
   Flashbar,
   Toggle,
-  Input,
   FormField,
   Box,
-  Modal,
-  RadioGroup,
+  Select,
   Textarea,
+  Input,
+  Table,
+  type SelectProps,
 } from '@cloudscape-design/components';
+import type { FlashbarProps } from '@cloudscape-design/components';
+import authApi from '../services/authApi';
 
-interface TypeEntry {
+/** Regla regex configurable. */
+interface RegexRule {
+  type: string;
+  pattern: string;
   enabled: boolean;
-  label: string;
-  description: string;
 }
 
-interface CustomType {
+/** Método de ofuscación: IA, Regex o ambos. */
+type DetectionMethod = 'ai' | 'regex' | 'both';
+
+/** Configuración avanzada de detección. */
+interface DetectionConfig {
+  detectionMethod: DetectionMethod;
+  bedrockModelId: string;
+  bedrockTemperature: number;
+  bedrockPrompt: string;
+  regexRules: RegexRule[];
+  ignoreEntities: string[];
+}
+
+interface BedrockModel {
   id: string;
-  enabled: boolean;
   label: string;
-  description: string;
-  pattern?: string;
+  provider: string;
 }
 
-interface FullConfig {
-  version: number;
-  types: Record<string, TypeEntry>;
-  custom_types: CustomType[];
-  updated_at: string | null;
-  engine?: string;
-  ollama_prompt?: string;
-}
+/**
+ * Valida la configuración de detección.
+ * Retorna un mensaje de error o null si es válida.
+ */
+export const validateDetectionConfig = (config: DetectionConfig): string | null => {
+  const method = config.detectionMethod ?? 'both';
+  if (!['ai', 'regex', 'both'].includes(method)) {
+    return 'Debe seleccionar un método de ofuscación válido.';
+  }
+  const usesRegex = method === 'regex' || method === 'both';
 
-interface EngineStatus {
-  ollama: { available: boolean; model: string; url: string };
-  spacy: { available: boolean; model: string };
-  active_engine: string;
-}
-
-const DEFAULT_OLLAMA_PROMPT = `Analiza el siguiente texto y extrae TODOS los datos personales sensibles.
-
-Devuelve SOLO un JSON array con los datos encontrados. Cada elemento debe tener:
-- "text": el texto exacto encontrado (tal cual aparece)
-- "type": uno de: NOMBRE, DIRECCION
-
-Reglas:
-- NOMBRE: nombres completos de personas (nombre + apellido). Incluye nombres en MAYÚSCULAS.
-- DIRECCION: direcciones postales, ciudades con país (ej: "Santiago, Chile"), calles con número.
-- NO incluyas: títulos de cargo, nombres de empresas, tecnologías, idiomas.
-- Si no hay datos sensibles, devuelve un array vacío: []
-
-Texto a analizar:
----
-{text}
----
-
-Responde SOLO con el JSON array, sin explicaciones:`;
+  if (!config.bedrockModelId) {
+    return 'Debe seleccionar un modelo de Bedrock.';
+  }
+  if (
+    typeof config.bedrockTemperature !== 'number' ||
+    Number.isNaN(config.bedrockTemperature) ||
+    config.bedrockTemperature < 0 ||
+    config.bedrockTemperature > 1
+  ) {
+    return 'La temperatura debe ser un número entre 0 y 1.';
+  }
+  if (!config.bedrockPrompt.trim() || !config.bedrockPrompt.includes('{text}')) {
+    return 'El prompt no puede estar vacío y debe incluir el marcador {text}.';
+  }
+  const badRule = config.regexRules.find((r) => !r.type.trim() || !r.pattern.trim());
+  if (badRule) {
+    return 'Cada regla regex requiere un tipo y un patrón.';
+  }
+  if (usesRegex && !config.regexRules.some((r) => r.enabled)) {
+    return 'El método seleccionado usa regex pero no hay ninguna regla activa.';
+  }
+  return null;
+};
 
 const ConfigPage: React.FC = () => {
-  const [config, setConfig] = useState<FullConfig | null>(null);
+  const [detection, setDetection] = useState<DetectionConfig | null>(null);
+  const [models, setModels] = useState<BedrockModel[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [newTypeLabel, setNewTypeLabel] = useState('');
-  const [newTypeDesc, setNewTypeDesc] = useState('');
-  const [newTypePattern, setNewTypePattern] = useState('');
-  const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
-  const [flashMessages, setFlashMessages] = useState<Array<{
-    type: 'success' | 'error';
-    content: string;
-    id: string;
-    dismissible: boolean;
-  }>>([]);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [flashMessages, setFlashMessages] = useState<FlashbarProps.MessageDefinition[]>([]);
 
-  useEffect(() => {
-    const fetchConfig = async () => {
-      try {
-        const response = await fetch('/api/config');
-        const data = await response.json();
-        // Handle v1 format migration
-        if (!data.version || data.version < 2) {
-          const types: Record<string, TypeEntry> = {};
-          const oldTypes = data.types || data;
-          const defaultDescs: Record<string, string> = {
-            nombre: 'Detecta nombres y apellidos de personas',
-            email: 'Detecta direcciones de correo electrónico',
-            celular: 'Detecta números de celular con prefijo +54 9',
-            telefono: 'Detecta números de teléfono fijo con prefijo +54',
-            direccion: 'Detecta direcciones postales',
-            tarjeta_credito: 'Detecta números de tarjeta de crédito (16 dígitos)',
-            cuenta_bancaria: 'Detecta números de CBU (22 dígitos)',
-            dni: 'Detecta números de DNI argentino (7-8 dígitos)',
-            cuit_cuil: 'Detecta números de CUIT/CUIL (XX-XXXXXXXX-X)',
-            pasaporte: 'Detecta números de pasaporte argentino (AAX######)',
-          };
-          for (const [key, val] of Object.entries(oldTypes)) {
-            types[key] = {
-              enabled: typeof val === 'boolean' ? val : (val as TypeEntry).enabled ?? true,
-              label: key.toUpperCase(),
-              description: defaultDescs[key] || '',
-            };
-          }
-          setConfig({ version: 2, types, custom_types: [], updated_at: null, engine: 'ollama' });
-        } else {
-          setConfig({ engine: 'ollama', ...data } as FullConfig);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Error de red');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    const fetchEngineStatus = async () => {
-      try {
-        const response = await fetch('/api/status/engine');
-        if (response.ok) {
-          const data: EngineStatus = await response.json();
-          setEngineStatus(data);
-        }
-      } catch {
-        // Silently fail
-      }
-    };
-
-    fetchConfig();
-    fetchEngineStatus();
+  const fetchConfig = useCallback(async () => {
+    setLoading(true);
+    try {
+      const detRes = await authApi.get('/config/detection');
+      const cfg = detRes.data.config as DetectionConfig;
+      const availableModels = (detRes.data.availableModels as BedrockModel[]) || [];
+      setDetection(cfg);
+      setModels(availableModels);
+      // Derivar el proveedor a partir del modelo configurado.
+      const current = availableModels.find((m) => m.id === cfg.bedrockModelId);
+      setSelectedProvider(current?.provider ?? availableModels[0]?.provider ?? null);
+    } catch {
+      setDetection(null);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const handleToggle = (key: string, enabled: boolean) => {
-    if (!config) return;
-    const newTypes = { ...config.types, [key]: { ...config.types[key], enabled } };
-    // Validate at least one active
-    const anyActive = Object.values(newTypes).some(t => t.enabled) ||
-      config.custom_types.some(ct => ct.enabled);
-    if (!anyActive) {
-      setFlashMessages([{
-        type: 'error',
-        content: 'Debe existir al menos 1 tipo activo.',
-        id: 'min-type',
+  useEffect(() => {
+    fetchConfig();
+  }, [fetchConfig]);
+
+  /* ─── Helpers de detección ──────────────────────────────────────── */
+
+  const updateDetection = (patch: Partial<DetectionConfig>) => {
+    setDetection((prev) => (prev ? { ...prev, ...patch } : prev));
+  };
+
+  const updateRule = (index: number, patch: Partial<RegexRule>) => {
+    setDetection((prev) => {
+      if (!prev) return prev;
+      const rules = prev.regexRules.map((r, i) => (i === index ? { ...r, ...patch } : r));
+      return { ...prev, regexRules: rules };
+    });
+  };
+
+  const addRule = () => {
+    setDetection((prev) =>
+      prev
+        ? { ...prev, regexRules: [...prev.regexRules, { type: '', pattern: '', enabled: true }] }
+        : prev
+    );
+  };
+
+  const removeRule = (index: number) => {
+    setDetection((prev) =>
+      prev ? { ...prev, regexRules: prev.regexRules.filter((_, i) => i !== index) } : prev
+    );
+  };
+
+  const flash = (type: 'success' | 'error', content: string) => {
+    setFlashMessages([
+      {
+        type,
+        content,
+        id: `${type}-${Date.now()}`,
         dismissible: true,
-      }]);
-      return;
-    }
-    setConfig({ ...config, types: newTypes });
-    setFlashMessages([]);
-  };
-
-  const handleDescriptionChange = (key: string, description: string) => {
-    if (!config) return;
-    const newTypes = { ...config.types, [key]: { ...config.types[key], description } };
-    setConfig({ ...config, types: newTypes });
-  };
-
-  const handleCustomToggle = (index: number, enabled: boolean) => {
-    if (!config) return;
-    const newCustom = [...config.custom_types];
-    newCustom[index] = { ...newCustom[index], enabled };
-    const anyActive = Object.values(config.types).some(t => t.enabled) ||
-      newCustom.some(ct => ct.enabled);
-    if (!anyActive) {
-      setFlashMessages([{
-        type: 'error',
-        content: 'Debe existir al menos 1 tipo activo.',
-        id: 'min-type',
-        dismissible: true,
-      }]);
-      return;
-    }
-    setConfig({ ...config, custom_types: newCustom });
-  };
-
-  const handleCustomDescChange = (index: number, description: string) => {
-    if (!config) return;
-    const newCustom = [...config.custom_types];
-    newCustom[index] = { ...newCustom[index], description };
-    setConfig({ ...config, custom_types: newCustom });
-  };
-
-  const handleDeleteCustom = (index: number) => {
-    if (!config) return;
-    const newCustom = config.custom_types.filter((_, i) => i !== index);
-    setConfig({ ...config, custom_types: newCustom });
-  };
-
-  const handleAddType = () => {
-    if (!config || !newTypeLabel.trim()) return;
-    const id = newTypeLabel.trim().toLowerCase().replace(/\s+/g, '_');
-    const newCustom: CustomType = {
-      id,
-      enabled: true,
-      label: newTypeLabel.trim().toUpperCase(),
-      description: newTypeDesc.trim() || `Detecta ${newTypeLabel.trim().toLowerCase()}`,
-      pattern: newTypePattern.trim() || undefined,
-    };
-    setConfig({ ...config, custom_types: [...config.custom_types, newCustom] });
-    setNewTypeLabel('');
-    setNewTypeDesc('');
-    setNewTypePattern('');
-    setShowAddModal(false);
-  };
-
-  const handleEngineChange = (value: string) => {
-    if (!config) return;
-    setConfig({ ...config, engine: value });
+        onDismiss: () => setFlashMessages([]),
+      },
+    ]);
   };
 
   const handleSave = async () => {
-    if (!config) return;
+    if (!detection) {
+      return;
+    }
+
+    const error = validateDetectionConfig(detection);
+    if (error) {
+      setValidationError(error);
+      return;
+    }
+
     setSaving(true);
+    setValidationError(null);
     setFlashMessages([]);
+
     try {
-      const response = await fetch('/api/config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
-      });
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.detail?.message || 'Error al guardar');
-      }
-      setFlashMessages([{
-        type: 'success',
-        content: 'Configuración guardada correctamente.',
-        id: 'save-ok',
-        dismissible: true,
-      }]);
+      await authApi.put('/config/detection', detection);
+      flash('success', 'Configuración guardada correctamente.');
     } catch (err) {
-      setFlashMessages([{
-        type: 'error',
-        content: err instanceof Error ? err.message : 'Error al guardar',
-        id: 'save-err',
-        dismissible: true,
-      }]);
+      const msg =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        'La configuración no pudo ser guardada.';
+      flash('error', msg);
     } finally {
       setSaving(false);
     }
   };
 
-  if (loading) return <Container><Alert type="info">Cargando configuración...</Alert></Container>;
-  if (error) return <Container><Alert type="error">{error}</Alert></Container>;
+  if (loading) {
+    return (
+      <Container>
+        <Box textAlign="center" padding="l">
+          <Alert type="info">Cargando configuración...</Alert>
+        </Box>
+      </Container>
+    );
+  }
 
-  const ollamaDisabled = engineStatus ? !engineStatus.ollama.available : false;
+  // Proveedores disponibles (derivados de los modelos).
+  const providerOptions: SelectProps.Option[] = Array.from(
+    new Set(models.map((m) => m.provider))
+  )
+    .sort()
+    .map((p) => ({ value: p, label: p }));
+  const selectedProviderOption =
+    providerOptions.find((o) => o.value === selectedProvider) ?? null;
+
+  // Modelos del proveedor seleccionado.
+  const modelOptions: SelectProps.Option[] = models
+    .filter((m) => m.provider === selectedProvider)
+    .map((m) => ({ value: m.id, label: m.label }));
+  const selectedModel =
+    modelOptions.find((o) => o.value === detection?.bedrockModelId) ?? null;
+
+  // Opciones de método de ofuscación.
+  const methodOptions: SelectProps.Option[] = [
+    { value: 'both', label: 'Ambos (IA + Regex)', description: 'Combina IA y reglas regex (recomendado)' },
+    { value: 'ai', label: 'Solo IA', description: 'Detección contextual con Amazon Bedrock' },
+    { value: 'regex', label: 'Solo Regex', description: 'Reglas deterministas configurables' },
+  ];
+  const method: DetectionMethod = detection?.detectionMethod ?? 'both';
+  const selectedMethodOption = methodOptions.find((o) => o.value === method) ?? methodOptions[0];
+  const showAi = method === 'ai' || method === 'both';
+  const showRegex = method === 'regex' || method === 'both';
 
   return (
     <SpaceBetween size="l">
-      {flashMessages.length > 0 && (
-        <Flashbar items={flashMessages.map(msg => ({
-          ...msg,
-          onDismiss: () => setFlashMessages(prev => prev.filter(m => m.id !== msg.id)),
-        }))} />
+      {flashMessages.length > 0 && <Flashbar items={flashMessages} />}
+
+      {validationError && (
+        <Alert type="error" dismissible onDismiss={() => setValidationError(null)}>
+          {validationError}
+        </Alert>
       )}
-
-      <Container
-        header={
-          <Header variant="h2">
-            Motor de IA
-          </Header>
-        }
-      >
-        <SpaceBetween size="s">
-          {ollamaDisabled && (
-            <Alert type="warning">
-              Ollama no está disponible. Verifique que Ollama esté instalado y ejecutándose con el modelo llama3.1:8b.
-            </Alert>
-          )}
-          <RadioGroup
-            value={config?.engine || 'ollama'}
-            onChange={({ detail }) => handleEngineChange(detail.value)}
-            items={[
-              {
-                value: 'ollama',
-                label: 'Ollama (Llama 3.1 8B)',
-                description: 'Mayor precisión para nombres y direcciones. Requiere Ollama instalado.',
-                disabled: ollamaDisabled,
-              },
-              {
-                value: 'spacy',
-                label: 'spaCy (es_core_news_lg)',
-                description: 'Más rápido pero menos preciso con nombres en mayúsculas.',
-              },
-            ]}
-          />
-        </SpaceBetween>
-      </Container>
-
-      <Container
-        header={
-          <Header variant="h2">
-            Prompt de Ollama
-          </Header>
-        }
-      >
-        <SpaceBetween size="s">
-          <FormField
-            description="Use {text} como placeholder para el texto del documento"
-          >
-            <Textarea
-              value={config?.ollama_prompt ?? DEFAULT_OLLAMA_PROMPT}
-              onChange={({ detail }) => {
-                if (!config) return;
-                setConfig({ ...config, ollama_prompt: detail.value });
-              }}
-              rows={12}
-            />
-          </FormField>
-          <Button
-            onClick={() => {
-              if (!config) return;
-              setConfig({ ...config, ollama_prompt: DEFAULT_OLLAMA_PROMPT });
-            }}
-          >
-            Restaurar prompt por defecto
-          </Button>
-        </SpaceBetween>
-      </Container>
 
       <Container
         header={
           <Header
             variant="h1"
-            description="Configure qué tipos de datos sensibles detectar. Puede editar las descripciones y agregar tipos personalizados."
+            description="Configure el motor de IA, el prompt y las reglas deterministas usadas para detectar y ofuscar datos sensibles."
             actions={
-              <SpaceBetween size="xs" direction="horizontal">
-                <Button onClick={() => setShowAddModal(true)}>
-                  Agregar tipo
-                </Button>
-                <Button variant="primary" onClick={handleSave} loading={saving}>
-                  {saving ? 'Guardando...' : 'Guardar configuración'}
-                </Button>
-              </SpaceBetween>
+              <Button variant="primary" onClick={handleSave} loading={saving} disabled={loading || !detection}>
+                Guardar configuración
+              </Button>
             }
           >
-            Configuración de tipos de datos sensibles
+            Configuración
           </Header>
         }
       >
-        <SpaceBetween size="m">
-          {config && Object.entries(config.types).map(([key, typeEntry]) => (
-            <Box key={key} padding={{ vertical: 'xs' }}>
-              <SpaceBetween size="xs">
-                <Toggle
-                  checked={typeEntry.enabled}
-                  onChange={({ detail }) => handleToggle(key, detail.checked)}
-                >
-                  <strong>[{typeEntry.label}]</strong>
-                </Toggle>
-                <Input
-                  value={typeEntry.description}
-                  onChange={({ detail }) => handleDescriptionChange(key, detail.value)}
-                  placeholder="Descripción del tipo de dato..."
-                />
-              </SpaceBetween>
-            </Box>
-          ))}
-
-          {config && config.custom_types.length > 0 && (
-            <>
-              <Header variant="h3">Tipos personalizados</Header>
-              {config.custom_types.map((ct, index) => (
-                <Box key={ct.id} padding={{ vertical: 'xs' }}>
-                  <SpaceBetween size="xs">
-                    <SpaceBetween size="xs" direction="horizontal">
-                      <Toggle
-                        checked={ct.enabled}
-                        onChange={({ detail }) => handleCustomToggle(index, detail.checked)}
-                      >
-                        <strong>[{ct.label}]</strong>
-                      </Toggle>
-                      <Button
-                        variant="icon"
-                        iconName="remove"
-                        onClick={() => handleDeleteCustom(index)}
-                      />
-                    </SpaceBetween>
-                    <Input
-                      value={ct.description}
-                      onChange={({ detail }) => handleCustomDescChange(index, detail.value)}
-                      placeholder="Descripción..."
-                    />
-                    {ct.pattern && (
-                      <Box color="text-body-secondary" fontSize="body-s">
-                        Patrón regex: {ct.pattern}
-                      </Box>
-                    )}
-                  </SpaceBetween>
-                </Box>
-              ))}
-            </>
-          )}
-        </SpaceBetween>
+        <Box color="text-body-secondary">
+          Los cambios se aplican a los próximos documentos procesados.
+        </Box>
       </Container>
 
-      <Modal
-        visible={showAddModal}
-        onDismiss={() => setShowAddModal(false)}
-        header="Agregar nuevo tipo de dato sensible"
-        footer={
-          <Box float="right">
-            <SpaceBetween size="xs" direction="horizontal">
-              <Button onClick={() => setShowAddModal(false)}>Cancelar</Button>
-              <Button variant="primary" onClick={handleAddType} disabled={!newTypeLabel.trim()}>
-                Agregar
-              </Button>
+      {detection && (
+        <>
+          <Container header={<Header variant="h2" description="Elija qué algoritmos se aplican para detectar y ofuscar datos sensibles.">Método de ofuscación</Header>}>
+            <FormField
+              label="Método"
+              description="IA usa Amazon Bedrock (contextual); Regex usa reglas deterministas; Ambos combina los dos motores."
+            >
+              <Select
+                selectedOption={selectedMethodOption}
+                options={methodOptions}
+                onChange={({ detail }) =>
+                  updateDetection({
+                    detectionMethod: (detail.selectedOption.value as DetectionMethod) ?? 'both',
+                  })
+                }
+              />
+            </FormField>
+          </Container>
+
+          {showAi && (
+          <>
+          <Container header={<Header variant="h2" description="Modelo de Amazon Bedrock usado para el análisis contextual.">Modelo de IA</Header>}>
+            <SpaceBetween size="l">
+              <FormField
+                label="Proveedor"
+                description="Elija el proveedor del modelo de IA (Bedrock)."
+              >
+                <Select
+                  selectedOption={selectedProviderOption}
+                  options={providerOptions}
+                  onChange={({ detail }) => {
+                    const provider = detail.selectedOption.value ?? '';
+                    setSelectedProvider(provider);
+                    // Auto-seleccionar el primer modelo del proveedor.
+                    const first = models.find((m) => m.provider === provider);
+                    if (first) updateDetection({ bedrockModelId: first.id });
+                  }}
+                  placeholder="Seleccione un proveedor"
+                />
+              </FormField>
+
+              <FormField label="Modelo">
+                <Select
+                  selectedOption={selectedModel}
+                  options={modelOptions}
+                  onChange={({ detail }) =>
+                    updateDetection({ bedrockModelId: detail.selectedOption.value ?? '' })
+                  }
+                  placeholder="Seleccione un modelo"
+                  empty="No hay modelos para este proveedor"
+                />
+              </FormField>
+
+              <FormField
+                label="Temperatura del modelo"
+                description="Controla la aleatoriedad de la respuesta. 0 = determinista y preciso (recomendado para detección de PII); valores más altos generan respuestas más variadas. Rango: 0 a 1."
+                constraintText="Valor entre 0 y 1 (ej: 0, 0.2, 0.5)."
+              >
+                <Input
+                  type="number"
+                  value={String(detection.bedrockTemperature)}
+                  step={0.1}
+                  inputMode="decimal"
+                  onChange={({ detail }) => {
+                    const parsed = Number(detail.value);
+                    updateDetection({
+                      bedrockTemperature: Number.isNaN(parsed) ? 0 : parsed,
+                    });
+                  }}
+                  placeholder="0.0"
+                />
+              </FormField>
             </SpaceBetween>
-          </Box>
-        }
-      >
-        <SpaceBetween size="m">
-          <FormField label="Nombre del tipo (se usará como etiqueta [NOMBRE])">
-            <Input
-              value={newTypeLabel}
-              onChange={({ detail }) => setNewTypeLabel(detail.value)}
-              placeholder="Ej: NUMERO_LEGAJO"
-            />
-          </FormField>
-          <FormField label="Descripción">
-            <Input
-              value={newTypeDesc}
-              onChange={({ detail }) => setNewTypeDesc(detail.value)}
-              placeholder="Ej: Detecta números de legajo de empleados"
-            />
-          </FormField>
-          <FormField
-            label="Patrón regex (opcional)"
-            description="Expresión regular para detectar este tipo de dato"
+          </Container>
+
+          <Container header={<Header variant="h2" description="Instrucciones que se envían al modelo. Debe incluir el marcador {text} donde se inserta el documento.">Prompt del modelo</Header>}>
+            <FormField label="Prompt" stretch>
+              <Textarea
+                value={detection.bedrockPrompt}
+                onChange={({ detail }) => updateDetection({ bedrockPrompt: detail.value })}
+                rows={14}
+                placeholder="Instrucciones para el modelo... incluya {text}"
+              />
+            </FormField>
+          </Container>
+          </>
+          )}
+
+          {showRegex && (
+          <Container
+            header={
+              <Header
+                variant="h2"
+                description="Reglas regex deterministas. Cada coincidencia se ofusca con la etiqueta del tipo indicado."
+                actions={<Button iconName="add-plus" onClick={addRule}>Agregar regla</Button>}
+              >
+                Reglas regex deterministas
+              </Header>
+            }
           >
-            <Input
-              value={newTypePattern}
-              onChange={({ detail }) => setNewTypePattern(detail.value)}
-              placeholder="Ej: \bLEG-\d{6}\b"
+            <Table
+              items={detection.regexRules}
+              variant="embedded"
+              empty={<Box textAlign="center" color="text-body-secondary">Sin reglas regex</Box>}
+              columnDefinitions={[
+                {
+                  id: 'enabled',
+                  header: 'Activa',
+                  width: 90,
+                  cell: (item) => {
+                    const idx = detection.regexRules.indexOf(item);
+                    return (
+                      <Toggle
+                        checked={item.enabled}
+                        onChange={({ detail }) => updateRule(idx, { enabled: detail.checked })}
+                      />
+                    );
+                  },
+                },
+                {
+                  id: 'type',
+                  header: 'Tipo (etiqueta)',
+                  width: 200,
+                  cell: (item) => {
+                    const idx = detection.regexRules.indexOf(item);
+                    return (
+                      <Input
+                        value={item.type}
+                        onChange={({ detail }) => updateRule(idx, { type: detail.value.toUpperCase() })}
+                        placeholder="Ej: DNI"
+                      />
+                    );
+                  },
+                },
+                {
+                  id: 'pattern',
+                  header: 'Patrón regex',
+                  cell: (item) => {
+                    const idx = detection.regexRules.indexOf(item);
+                    return (
+                      <Input
+                        value={item.pattern}
+                        onChange={({ detail }) => updateRule(idx, { pattern: detail.value })}
+                        placeholder="Expresión regular"
+                      />
+                    );
+                  },
+                },
+                {
+                  id: 'actions',
+                  header: '',
+                  width: 100,
+                  cell: (item) => {
+                    const idx = detection.regexRules.indexOf(item);
+                    return (
+                      <Button variant="inline-link" iconName="remove" onClick={() => removeRule(idx)}>
+                        Quitar
+                      </Button>
+                    );
+                  },
+                },
+              ]}
             />
-          </FormField>
-        </SpaceBetween>
-      </Modal>
+          </Container>
+          )}
+
+          <Container header={<Header variant="h2" description="Valores literales que el sistema NO debe ofuscar aunque se detecten (uno por línea).">Entidades a ignorar</Header>}>
+            <FormField label="Valores a ignorar" stretch>
+              <Textarea
+                value={detection.ignoreEntities.join('\n')}
+                onChange={({ detail }) =>
+                  updateDetection({
+                    ignoreEntities: detail.value
+                      .split('\n')
+                      .map((v) => v.trim())
+                      .filter((v) => v.length > 0),
+                  })
+                }
+                rows={6}
+                placeholder="Ej: Banco Nación&#10;Ministerio de Economía"
+              />
+            </FormField>
+          </Container>
+        </>
+      )}
     </SpaceBetween>
   );
 };

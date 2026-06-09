@@ -1,0 +1,2032 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  DataMask AWS v1.0 — Infraestructura backend para ofuscación de datos sensibles
+  en documentos PDF. Despliega S3, DynamoDB, Lambda, API Gateway, SQS, SNS y
+  CloudWatch Alarms.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - prod
+    Description: >-
+      Ambiente de despliegue. 'dev' permite eliminación rápida de recursos.
+      'prod' retiene datos críticos (S3, DynamoDB, KMS) al eliminar el stack.
+
+
+  AlertEmail:
+    Type: String
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: Debe ser una dirección de email válida.
+    Description: >-
+      Email para recibir notificaciones de alarmas del sistema (errores en
+      Lambda, latencia elevada, mensajes en la cola de errores).
+
+  BedrockModelId:
+    Type: String
+    Default: 'anthropic.claude-3-haiku-20240307-v1:0'
+    Description: >-
+      ID del modelo de AWS Bedrock para análisis contextual de PII.
+      Por defecto usa Claude 3 Haiku. Asegúrese de tener acceso al modelo
+      habilitado en la región de despliegue.
+
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: >-
+      Nombre del bucket S3 donde se han subido los artefactos ZIP de las
+      funciones Lambda. Este bucket debe existir antes de crear el stack.
+
+  LambdaCodeS3Prefix:
+    Type: String
+    Default: 'datamask/lambdas/'
+    Description: >-
+      Prefijo (path) dentro del bucket de artefactos donde se encuentran
+      los archivos ZIP de las funciones Lambda (trigger.zip, detection.zip,
+      redaction.zip, api.zip, pymupdf-layer.zip).
+
+  ProjectTag:
+    Type: String
+    Default: DataMask
+    Description: >-
+      Valor del tag 'Project' aplicado a todos los recursos creados.
+      Útil para identificar y gestionar costos en AWS Cost Explorer.
+
+  CognitoDomainPrefix:
+    Type: String
+    Default: ''
+    Description: >-
+      Prefijo del dominio de Cognito Hosted UI (debe ser único globalmente).
+      Ej: 'datamask-339712829454' produce
+      https://datamask-339712829454.auth.<region>.amazoncognito.com
+      Si se deja vacío, se usa 'datamask-<AccountId>'.
+
+  AppCallbackUrl:
+    Type: String
+    Default: 'https://main.d3nxh77gcdsvjs.amplifyapp.com/'
+    Description: >-
+      URL de la app a la que Cognito redirige tras el login (callback OAuth).
+      Debe terminar en '/'.
+
+  SamlMetadataUrl:
+    Type: String
+    Default: ''
+    Description: >-
+      URL del documento de metadata SAML de la aplicación creada en IAM
+      Identity Center. Dejar vacío en el primer despliegue (login con usuarios
+      nativos de Cognito); completar luego para federar con Identity Center.
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, 'prod']
+  IsDev: !Equals [!Ref Environment, 'dev']
+  HasSaml: !Not [!Equals [!Ref SamlMetadataUrl, '']]
+  HasCognitoDomainPrefix: !Not [!Equals [!Ref CognitoDomainPrefix, '']]
+
+Resources:
+  # =============================================================================
+  # KMS — Clave de cifrado para S3
+  # =============================================================================
+  S3KmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'Clave KMS para cifrado SSE-KMS del bucket de documentos DataMask (${Environment})'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: datamask-s3-key-policy
+        Statement:
+          - Sid: EnableRootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  S3KmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/datamask-${Environment}-s3-key'
+      TargetKeyId: !Ref S3KmsKey
+
+  # =============================================================================
+  # S3 — Bucket de logs de acceso
+  # =============================================================================
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub 'datamask-${Environment}-documents-${AWS::AccountId}-access-logs'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteLogsAfter90Days
+            Status: Enabled
+            ExpirationInDays: 90
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # Política para permitir que S3 escriba access logs en el bucket de logs
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogsBucket.Arn}/*'
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}'
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+
+  # =============================================================================
+  # S3 — Bucket de documentos (principal)
+  # =============================================================================
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - LogsBucketPolicy
+      - TriggerLambdaPermission
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'datamask-${Environment}-documents-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt S3KmsKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: !If [IsProd, Enabled, Suspended]
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogsBucket
+        LogFilePrefix: 'documents-access-logs/'
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteProcessingAfter30Days
+            Status: Enabled
+            Prefix: 'procesamiento/'
+            ExpirationInDays: 30
+          - Id: DeleteErrorsAfter30Days
+            Status: Enabled
+            Prefix: 'errores/'
+            ExpirationInDays: 30
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods:
+              - PUT
+              - GET
+            AllowedOrigins:
+              - '*'
+            AllowedHeaders:
+              - '*'
+            MaxAge: 3600
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Function: !GetAtt TriggerFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: 'originales/'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # Política del bucket de documentos: forzar cifrado en tránsito (TLS).
+  # Niega cualquier request que no use HTTPS (aws:SecureTransport=false).
+  DocumentsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}'
+              - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # =============================================================================
+  # DynamoDB — Tabla de documentos (single-table design con GSI1)
+  # =============================================================================
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub 'datamask-${Environment}-documents'
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # SQS — Dead Letter Queue para errores del pipeline
+  # =============================================================================
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'datamask-${Environment}-dlq'
+      MessageRetentionPeriod: 1209600  # 14 días
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # Lambda Layer — PyMuPDF para procesamiento de PDFs
+  # =============================================================================
+  PyMuPDFLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub 'datamask-${Environment}-pymupdf'
+      Description: Capa PyMuPDF para procesamiento de documentos PDF en la función de redacción
+      CompatibleRuntimes:
+        - python3.12
+      Content:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Sub '${LambdaCodeS3Prefix}pymupdf-layer.zip'
+
+  # =============================================================================
+  # IAM Role — Trigger Lambda
+  # =============================================================================
+  TriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'datamask-${Environment}-trigger-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/datamask-${Environment}-trigger:*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadOriginals
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                Resource: !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/originales/*'
+              - Sid: WriteProcessingAndErrors
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/procesamiento/*'
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/errores/*'
+              - Sid: DeleteOriginals
+                Effect: Allow
+                Action:
+                  - 's3:DeleteObject'
+                Resource: !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/originales/*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:Query'
+                Resource:
+                  - !GetAtt DocumentsTable.Arn
+                  - !Sub '${DocumentsTable.Arn}/index/GSI1'
+        - PolicyName: TextractAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Textract no soporta permisos a nivel de recurso — Resource '*' obligatorio
+              - Effect: Allow
+                Action:
+                  - 'textract:DetectDocumentText'
+                  - 'textract:StartDocumentTextDetection'
+                  - 'textract:GetDocumentTextDetection'
+                Resource: '*'
+        - PolicyName: KMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !GetAtt S3KmsKey.Arn
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:SendMessage'
+                Resource: !GetAtt DeadLetterQueue.Arn
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:datamask-${Environment}-detection'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # IAM Role — Detection Lambda
+  # =============================================================================
+  DetectionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'datamask-${Environment}-detection-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/datamask-${Environment}-detection:*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                Resource: !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/procesamiento/*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:Query'
+                Resource:
+                  - !GetAtt DocumentsTable.Arn
+                  - !Sub '${DocumentsTable.Arn}/index/GSI1'
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:Converse'
+                  - 'bedrock:ConverseStream'
+                Resource:
+                  # Foundation models en cualquier región (los inference
+                  # profiles cross-region us.* enrutan a varias regiones).
+                  - !Sub 'arn:aws:bedrock:*::foundation-model/*'
+                  # Inference profiles (ej: us.anthropic.claude-*).
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+        - PolicyName: KMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !GetAtt S3KmsKey.Arn
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:SendMessage'
+                Resource: !GetAtt DeadLetterQueue.Arn
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:datamask-${Environment}-redaction'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # IAM Role — Redaction Lambda
+  # =============================================================================
+  RedactionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'datamask-${Environment}-redaction-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/datamask-${Environment}-redaction:*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadOriginalsAndProcessing
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/originales/*'
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/procesamiento/*'
+              - Sid: WriteRedacted
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                Resource: !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/ofuscados/*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:Query'
+                Resource:
+                  - !GetAtt DocumentsTable.Arn
+                  - !Sub '${DocumentsTable.Arn}/index/GSI1'
+        - PolicyName: KMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !GetAtt S3KmsKey.Arn
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:SendMessage'
+                Resource: !GetAtt DeadLetterQueue.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # IAM Role — API Handler Lambda
+  # =============================================================================
+  ApiHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'datamask-${Environment}-api-handler-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/datamask-${Environment}-api-handler:*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteOriginals
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                Resource: !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/originales/*'
+              - Sid: ReadObjects
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/originales/*'
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/ofuscados/*'
+              - Sid: DeleteObjects
+                Effect: Allow
+                Action:
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/originales/*'
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/ofuscados/*'
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/procesamiento/*'
+                  - !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}/errores/*'
+              - Sid: ListBucket
+                Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                Resource: !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}'
+        - PolicyName: InvokeTrigger
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: !GetAtt TriggerFunction.Arn
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:Query'
+                Resource:
+                  - !GetAtt DocumentsTable.Arn
+                  - !Sub '${DocumentsTable.Arn}/index/GSI1'
+        - PolicyName: BedrockListModels
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:ListFoundationModels'
+                  - 'bedrock:ListInferenceProfiles'
+                Resource: '*'
+        - PolicyName: KMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !GetAtt S3KmsKey.Arn
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:datamask-${Environment}-*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # Lambda Function — Trigger (procesa eventos S3, extrae texto con Textract)
+  # =============================================================================
+  TriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'datamask-${Environment}-trigger'
+      Description: Procesa eventos S3 de documentos subidos y extrae texto con Textract
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Role: !GetAtt TriggerRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Sub '${LambdaCodeS3Prefix}trigger.zip'
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET: !Sub 'datamask-${Environment}-documents-${AWS::AccountId}'
+          DOCUMENTS_TABLE: !Sub 'datamask-${Environment}-documents'
+          ENVIRONMENT: !Ref Environment
+          DLQ_URL: !Ref DeadLetterQueue
+          DETECTION_FUNCTION_NAME: !Sub 'datamask-${Environment}-detection'
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      ReservedConcurrentExecutions: !If [IsProd, 10, !Ref 'AWS::NoValue']
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # Lambda Function — Detection (detecta PII con IA Bedrock + Regex)
+  # =============================================================================
+  DetectionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'datamask-${Environment}-detection'
+      Description: Detecta datos sensibles (PII) con IA (Bedrock) y reglas regex
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      MemorySize: 1024
+      Timeout: 120
+      Role: !GetAtt DetectionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Sub '${LambdaCodeS3Prefix}detection.zip'
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET: !Sub 'datamask-${Environment}-documents-${AWS::AccountId}'
+          DOCUMENTS_TABLE: !Sub 'datamask-${Environment}-documents'
+          ENVIRONMENT: !Ref Environment
+          DLQ_URL: !Ref DeadLetterQueue
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          REDACTION_FUNCTION_NAME: !Sub 'datamask-${Environment}-redaction'
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      ReservedConcurrentExecutions: !If [IsProd, 5, !Ref 'AWS::NoValue']
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # Lambda Function — Redaction (ofusca PII en PDFs con PyMuPDF)
+  # =============================================================================
+  RedactionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'datamask-${Environment}-redaction'
+      Description: Aplica redacción de datos sensibles en documentos PDF usando PyMuPDF
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      MemorySize: 1024
+      Timeout: 300
+      Role: !GetAtt RedactionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Sub '${LambdaCodeS3Prefix}redaction.zip'
+      Layers:
+        - !Ref PyMuPDFLayer
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET: !Sub 'datamask-${Environment}-documents-${AWS::AccountId}'
+          DOCUMENTS_TABLE: !Sub 'datamask-${Environment}-documents'
+          ENVIRONMENT: !Ref Environment
+          DLQ_URL: !Ref DeadLetterQueue
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      ReservedConcurrentExecutions: !If [IsProd, 5, !Ref 'AWS::NoValue']
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # Lambda Function — API Handler (procesa peticiones de API Gateway)
+  # =============================================================================
+  ApiHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'datamask-${Environment}-api-handler'
+      Description: Procesa peticiones REST del API Gateway para gestión de documentos
+      Runtime: python3.12
+      Handler: handler.handler
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt ApiHandlerRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Sub '${LambdaCodeS3Prefix}api.zip'
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET: !Sub 'datamask-${Environment}-documents-${AWS::AccountId}'
+          DOCUMENTS_TABLE: !Sub 'datamask-${Environment}-documents'
+          ENVIRONMENT: !Ref Environment
+          TRIGGER_FUNCTION_NAME: !Sub 'datamask-${Environment}-trigger'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # Lambda Permission — Permite a S3 invocar la función Trigger
+  # =============================================================================
+  TriggerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TriggerFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::datamask-${Environment}-documents-${AWS::AccountId}'
+      SourceAccount: !Ref 'AWS::AccountId'
+
+  # =============================================================================
+  # Lambda Permission — Permite a API Gateway invocar la función API Handler
+  # =============================================================================
+  ApiHandlerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiHandlerFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DataMaskApi}/*'
+
+  # =============================================================================
+  # Amazon Cognito — User Pool federado con IAM Identity Center (SAML)
+  #
+  # Cognito actúa como Service Provider (SP) SAML; IAM Identity Center es el
+  # IdP. El usuario hace login en Identity Center (que puede federar a su vez
+  # con Active Directory u otro IdP corporativo) y vuelve directo a la app.
+  # La autorización del API se hace con el JWT (id token) de Cognito.
+  # =============================================================================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'datamask-${Environment}-users'
+      # MFA y políticas de password (aplican a usuarios nativos; los usuarios
+      # federados se autentican en Identity Center).
+      MfaConfiguration: 'OFF'
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+      AutoVerifiedAttributes:
+        - email
+      UserPoolTags:
+        Project: !Ref ProjectTag
+        Environment: !Ref Environment
+        Application: DataMask
+        Stack: !Ref 'AWS::StackName'
+
+  # Proveedor de identidad SAML hacia IAM Identity Center.
+  # Solo se crea cuando se provee SamlMetadataUrl (federación habilitada).
+  CognitoSamlProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Condition: HasSaml
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ProviderName: IAMIdentityCenter
+      ProviderType: SAML
+      ProviderDetails:
+        MetadataURL: !Ref SamlMetadataUrl
+        IDPSignout: 'false'
+      AttributeMapping:
+        email: 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'
+
+  # Dominio de Cognito Hosted UI (pantalla de login que redirige a Identity Center).
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      Domain: !If
+        - HasCognitoDomainPrefix
+        - !Ref CognitoDomainPrefix
+        - !Sub 'datamask-${AWS::AccountId}'
+
+  # App client (público, sin secret) usado por la SPA.
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub 'datamask-${Environment}-web'
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      SupportedIdentityProviders: !If
+        - HasSaml
+        - [COGNITO, !Ref CognitoSamlProvider]
+        - [COGNITO]
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      CallbackURLs:
+        - !Ref AppCallbackUrl
+      LogoutURLs:
+        - !Ref AppCallbackUrl
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  # Authorizer de API Gateway que valida el JWT de Cognito.
+  ApiCognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub 'datamask-${Environment}-cognito-authorizer'
+      Type: COGNITO_USER_POOLS
+      RestApiId: !Ref DataMaskApi
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt CognitoUserPool.Arn
+
+  # =============================================================================
+  # API Gateway REST — Endpoint regional para la API de DataMask
+  # =============================================================================
+  DataMaskApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'datamask-${Environment}-api'
+      Description: !Sub 'DataMask API REST (${Environment}) — autenticación, uploads, documentos, configuración PII'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # API Gateway — Gateway Responses (403 genérico sin revelar existencia)
+  # =============================================================================
+  GatewayResponseAccessDenied:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResponseType: ACCESS_DENIED
+      StatusCode: '403'
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+      ResponseTemplates:
+        application/json: '{"message": "Forbidden"}'
+
+  GatewayResponseUnauthorized:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResponseType: UNAUTHORIZED
+      StatusCode: '403'
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+      ResponseTemplates:
+        application/json: '{"message": "Forbidden"}'
+
+  GatewayResponseMissingAuth:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResponseType: MISSING_AUTHENTICATION_TOKEN
+      StatusCode: '403'
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+      ResponseTemplates:
+        application/json: '{"message": "Forbidden"}'
+
+  # =============================================================================
+  # API Gateway — Resources (endpoints REST)
+  #
+  # La autenticación se resuelve en el frontend (IAM Identity Center, OIDC
+  # Device Flow). Los endpoints protegidos usan autorización AWS_IAM: cada
+  # request llega firmado con SigV4 usando credenciales temporales (STS).
+  # El proxy SSO (/auth/sso/*) es público: relaya el device flow a Identity
+  # Center porque el usuario aún no está autenticado.
+  # =============================================================================
+
+  # /upload
+  UploadResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !GetAtt DataMaskApi.RootResourceId
+      PathPart: upload
+
+  # /upload/presign
+  UploadPresignResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref UploadResource
+      PathPart: presign
+
+  # /documents
+  DocumentsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !GetAtt DataMaskApi.RootResourceId
+      PathPart: documents
+
+  # /documents/{id}
+  DocumentByIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentsResource
+      PathPart: '{id}'
+
+  # /documents/{id}/download
+  DocumentDownloadResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentByIdResource
+      PathPart: download
+
+  # /documents/{id}/download/{type}
+  DocumentDownloadTypeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentDownloadResource
+      PathPart: '{type}'
+
+  # /documents/s3
+  DocumentsS3Resource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentsResource
+      PathPart: s3
+
+  # /documents/s3/list
+  DocumentsS3ListResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentsS3Resource
+      PathPart: list
+
+  # /documents/s3/download
+  DocumentsS3DownloadResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentsS3Resource
+      PathPart: download
+
+  # /documents/s3/object
+  DocumentsS3ObjectResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentsS3Resource
+      PathPart: object
+
+  # /documents/process
+  DocumentsProcessResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentsResource
+      PathPart: process
+
+  # /documents/purge
+  DocumentsPurgeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref DocumentsResource
+      PathPart: purge
+
+  # /config
+  ConfigResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !GetAtt DataMaskApi.RootResourceId
+      PathPart: config
+
+  # /config/detection
+  ConfigDetectionResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref ConfigResource
+      PathPart: detection
+
+  # /config/models
+  ConfigModelsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref ConfigResource
+      PathPart: models
+
+  # =============================================================================
+  # API Gateway — Métodos con Lambda Proxy Integration
+  #
+  # Endpoints protegidos: AuthorizationType COGNITO_USER_POOLS (JWT de Cognito).
+  # Métodos OPTIONS: AuthorizationType NONE (preflight CORS).
+  # =============================================================================
+
+  # --- Endpoints protegidos (Cognito) ---
+
+  # POST /upload/presign
+  UploadPresignPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref UploadPresignResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # OPTIONS /upload/presign (CORS)
+  UploadPresignOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref UploadPresignResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # POST /documents
+  DocumentsPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # GET /documents
+  DocumentsGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # DELETE /documents (purga el registro de auditoría del usuario)
+  DocumentsDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsResource
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # OPTIONS /documents (CORS)
+  DocumentsOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # POST /documents/purge (borra procesados + ofuscados del usuario)
+  DocumentsPurgePost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsPurgeResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  DocumentsPurgeOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsPurgeResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # GET /documents/{id}
+  DocumentByIdGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentByIdResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # OPTIONS /documents/{id} (CORS)
+  DocumentByIdOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentByIdResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # DELETE /documents/{id}
+  DocumentByIdDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentByIdResource
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+
+  # GET /documents/{id}/download/{type}
+  DocumentDownloadTypeGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentDownloadTypeResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # OPTIONS /documents/{id}/download/{type} (CORS)
+  DocumentDownloadTypeOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentDownloadTypeResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # GET /documents/s3/list
+  DocumentsS3ListGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsS3ListResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  DocumentsS3ListOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsS3ListResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # GET /documents/s3/download
+  DocumentsS3DownloadGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsS3DownloadResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  DocumentsS3DownloadOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsS3DownloadResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # DELETE /documents/s3/object
+  DocumentsS3ObjectDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsS3ObjectResource
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  DocumentsS3ObjectOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsS3ObjectResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+
+  # POST /documents/process
+  DocumentsProcessPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsProcessResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  DocumentsProcessOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref DocumentsProcessResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # GET /config/detection
+  ConfigDetectionGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref ConfigDetectionResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # PUT /config/detection
+  ConfigDetectionPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref ConfigDetectionResource
+      HttpMethod: PUT
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # OPTIONS /config/detection (CORS)
+  ConfigDetectionOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref ConfigDetectionResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,PUT,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # GET /config/models
+  ConfigModelsGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref ConfigModelsResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # OPTIONS /config/models (CORS)
+  ConfigModelsOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref ConfigModelsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # =============================================================================
+  # API Gateway — Deployment y Stage
+  # =============================================================================
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - UploadPresignPost
+      - DocumentsPost
+      - DocumentsGet
+      - DocumentsDelete
+      - DocumentsPurgePost
+      - DocumentByIdGet
+      - DocumentByIdDelete
+      - DocumentDownloadTypeGet
+      - DocumentsS3ListGet
+      - DocumentsS3DownloadGet
+      - DocumentsS3ObjectDelete
+      - DocumentsProcessPost
+      - ConfigDetectionGet
+      - ConfigDetectionPut
+      - ConfigModelsGet
+      - UploadPresignOptions
+      - DocumentsOptions
+      - DocumentsPurgeOptions
+      - DocumentByIdOptions
+      - DocumentDownloadTypeOptions
+      - DocumentsS3ListOptions
+      - DocumentsS3DownloadOptions
+      - DocumentsS3ObjectOptions
+      - DocumentsProcessOptions
+      - ConfigDetectionOptions
+      - ConfigModelsOptions
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      Description: 'Deployment con authorizer Cognito (auth v2)'
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Environment
+      Description: !Sub 'DataMask API Stage (${Environment})'
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          MetricsEnabled: true
+          DataTraceEnabled: !If [IsDev, true, false]
+          LoggingLevel: !If [IsDev, INFO, ERROR]
+          ThrottlingRateLimit: 100
+          ThrottlingBurstLimit: 200
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  # =============================================================================
+  # SNS — Topic de alertas y suscripción email
+  # =============================================================================
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'datamask-${Environment}-alerts'
+      DisplayName: !Sub 'DataMask ${Environment} - Alertas'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Application
+          Value: DataMask
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  AlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # =============================================================================
+  # CloudWatch Alarms — Errores Lambda > 5 en 5 minutos
+  # =============================================================================
+  TriggerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'datamask-${Environment}-trigger-errors'
+      AlarmDescription: !Sub 'Errores en Lambda Trigger superan 5 en 5 minutos (${Environment})'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TriggerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+
+  DetectionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'datamask-${Environment}-detection-errors'
+      AlarmDescription: !Sub 'Errores en Lambda Detection superan 5 en 5 minutos (${Environment})'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DetectionFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+
+  RedactionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'datamask-${Environment}-redaction-errors'
+      AlarmDescription: !Sub 'Errores en Lambda Redaction superan 5 en 5 minutos (${Environment})'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RedactionFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+
+  ApiHandlerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'datamask-${Environment}-api-handler-errors'
+      AlarmDescription: !Sub 'Errores en Lambda API Handler superan 5 en 5 minutos (${Environment})'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ApiHandlerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+
+  # =============================================================================
+  # CloudWatch Alarm — Latencia P99 API Gateway > 3 segundos
+  # =============================================================================
+  ApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'datamask-${Environment}-api-p99-latency'
+      AlarmDescription: !Sub 'Latencia P99 de API Gateway supera 3 segundos en 5 minutos (${Environment})'
+      Namespace: AWS/ApiGateway
+      MetricName: Latency
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub 'datamask-${Environment}-api'
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+
+  # =============================================================================
+  # CloudWatch Alarm — DLQ mensajes visibles > 0
+  # =============================================================================
+  DlqMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'datamask-${Environment}-dlq-messages'
+      AlarmDescription: !Sub 'Hay mensajes en la Dead Letter Queue — investigar errores en el pipeline (${Environment})'
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt DeadLetterQueue.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+
+# =============================================================================
+# Outputs — Valores exportados para integración con frontend y otros stacks
+# =============================================================================
+Outputs:
+  ApiUrl:
+    Description: URL base del API Gateway REST para integración con el frontend
+    Value: !Sub 'https://${DataMaskApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub 'datamask-${Environment}-api-url'
+
+  DocumentsBucketName:
+    Description: Nombre del bucket S3 para documentos (originales, procesados, ofuscados)
+    Value: !Ref DocumentsBucket
+    Export:
+      Name: !Sub 'datamask-${Environment}-documents-bucket'
+
+  DocumentsTableName:
+    Description: Nombre de la tabla DynamoDB de documentos
+    Value: !Ref DocumentsTable
+    Export:
+      Name: !Sub 'datamask-${Environment}-documents-table'
+
+  DocumentsTableArn:
+    Description: ARN de la tabla DynamoDB de documentos
+    Value: !GetAtt DocumentsTable.Arn
+    Export:
+      Name: !Sub 'datamask-${Environment}-documents-table-arn'
+
+  AlertsTopicArn:
+    Description: ARN del topic SNS para alertas del sistema
+    Value: !Ref AlertsTopic
+    Export:
+      Name: !Sub 'datamask-${Environment}-alerts-topic-arn'
+
+  KmsKeyArn:
+    Description: ARN de la clave KMS utilizada para cifrado S3
+    Value: !GetAtt S3KmsKey.Arn
+    Export:
+      Name: !Sub 'datamask-${Environment}-kms-key-arn'
+
+  DeadLetterQueueUrl:
+    Description: URL de la cola SQS Dead Letter Queue para errores del pipeline
+    Value: !Ref DeadLetterQueue
+    Export:
+      Name: !Sub 'datamask-${Environment}-dlq-url'
+
+  ApiGatewayId:
+    Description: ID del API Gateway REST
+    Value: !Ref DataMaskApi
+    Export:
+      Name: !Sub 'datamask-${Environment}-api-id'
+
+  CognitoUserPoolId:
+    Description: ID del User Pool de Cognito
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub 'datamask-${Environment}-cognito-user-pool-id'
+
+  CognitoUserPoolClientId:
+    Description: ID del App Client de Cognito (usado por la SPA)
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub 'datamask-${Environment}-cognito-client-id'
+
+  CognitoDomain:
+    Description: Dominio de Cognito Hosted UI (login)
+    Value: !If
+      - HasCognitoDomainPrefix
+      - !Sub '${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'
+      - !Sub 'datamask-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com'
+    Export:
+      Name: !Sub 'datamask-${Environment}-cognito-domain'
+
+  CognitoSamlAcsUrl:
+    Description: >-
+      ACS URL (Assertion Consumer Service) para configurar la app SAML en
+      IAM Identity Center.
+    Value: !If
+      - HasCognitoDomainPrefix
+      - !Sub 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com/saml2/idpresponse'
+      - !Sub 'https://datamask-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/saml2/idpresponse'
+
+  CognitoSamlAudienceUri:
+    Description: >-
+      Audience URI (SP Entity ID) para configurar la app SAML en IAM
+      Identity Center.
+    Value: !Sub 'urn:amazon:cognito:sp:${CognitoUserPool}'

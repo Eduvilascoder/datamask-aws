@@ -70,6 +70,31 @@ export interface ProcessingSummary {
   total_entities: number;
 }
 
+/** Estado de procesamiento de un documento en el pipeline AWS. */
+export type DocumentStatus = 'UPLOADED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+
+/** Categoría de error para documentos FAILED. */
+export type ErrorCategory =
+  | 'error de lectura'
+  | 'error de NER'
+  | 'error de escritura'
+  | 'error de servicio';
+
+/** Registro de un documento gestionado por el pipeline. */
+export interface DocumentRecord {
+  documentId: string;
+  fileName: string;
+  fileSize: number;
+  status: DocumentStatus;
+  uploadedAt: string;
+  completedAt: string | null;
+  entitiesFound: number | null;
+  entitiesByType: Record<string, number> | null;
+  processingTimeMs: number | null;
+  errorMessage: string | null;
+  errorCategory: ErrorCategory | null;
+}
+
 /** Entrada del registro de auditoría. */
 export interface AuditLogEntry {
   filename: string;

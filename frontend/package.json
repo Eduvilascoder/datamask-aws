@@ -1,25 +1,49 @@
 {
-  "name": "pdf-datos-sensibles-frontend",
-  "version": "1.0.0",
+  "name": "datamask-aws-frontend",
+  "version": "2.0.0",
   "private": true,
-  "description": "Frontend React + Cloudscape para ofuscación de datos sensibles en PDFs",
+  "type": "module",
+  "description": "Frontend React + Cloudscape para DataMask AWS — ofuscación de datos sensibles en PDFs",
   "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/signature-v4": "^3.374.0",
     "@cloudscape-design/components": "^3.0.0",
     "@cloudscape-design/global-styles": "^1.0.0",
+    "@smithy/protocol-http": "^4.1.8",
+    "axios": "^1.7.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.20.0"
+    "react-markdown": "^9.1.0",
+    "react-router-dom": "^6.20.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.4.0",
+    "@testing-library/react": "^14.2.0",
+    "@testing-library/user-event": "^14.5.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-react": "^7.34.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "jsdom": "^24.0.0",
+    "prettier": "^3.2.0",
     "typescript": "^5.3.0",
     "vite": "^5.0.0",
-    "@vitejs/plugin-react": "^4.2.0"
+    "vitest": "^1.4.0"
   },
   "scripts": {
-    "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src/ --ext .ts,.tsx --report-unused-disable-directives --max-warnings 0",
+    "lint:fix": "eslint src/ --ext .ts,.tsx --fix",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\""
   }
 }

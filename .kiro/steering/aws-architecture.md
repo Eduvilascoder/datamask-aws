@@ -15,6 +15,17 @@ description: "Patrones de arquitectura AWS: Well-Architected Framework, servicio
 - API: API Gateway (REST/HTTP/WebSocket)
 - Secrets: AWS Secrets Manager — NUNCA hardcodear credenciales
 
+## Autenticación y autorización
+- Identidad de usuarios: **AWS IAM Identity Center** (no Cognito). Permite usar
+  los usuarios/grupos de la organización y federar con Active Directory u otro
+  IdP SAML/OIDC externo.
+- Flujo: OIDC Device Authorization Flow. El navegador NO llama a Identity Center
+  directamente (no expone CORS); el Lambda API actúa de proxy (`/auth/sso/*`).
+- Autorización del API: API Gateway con **AWS_IAM** + firma **SigV4** usando las
+  credenciales temporales (STS) obtenidas de Identity Center.
+- Nunca credenciales de larga duración en el cliente; siempre STS temporal.
+- Todo corre en AWS (Amplify + API Gateway + Lambda). No hay servidores locales.
+
 ## Patrones de resiliencia
 - Circuit breaker con exponential backoff en llamadas externas
 - Dead letter queues (DLQ) en todas las colas SQS

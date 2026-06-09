@@ -1,0 +1,18 @@
+# CDK output
+cdk.out/
+dist/
+
+# Dependencies
+node_modules/
+
+# TypeScript build
+*.js
+*.d.ts
+!jest.config.js
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
