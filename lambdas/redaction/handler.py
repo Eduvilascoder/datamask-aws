@@ -36,7 +36,9 @@ from output_generator import (
 from config_filter import (
     filter_entities_by_config,
     get_active_types,
+    is_macie_verification_enabled,
 )
+from macie_client import MACIE_DISABLED, verify_redacted_object
 from pdf_redactor import redact_pdf
 
 logger = logging.getLogger()
@@ -216,6 +218,15 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         # frontend no declara "terminado" hasta que el archivo está disponible.
         _confirm_object_exists(s3_keys["s3_key_redacted"])
 
+        # Segunda capa OPCIONAL: verificación de PII residual con Amazon Macie
+        # sobre el documento ofuscado. No bloquea ni rompe el pipeline.
+        macie_status = _maybe_verify_with_macie(
+            user_id=user_id,
+            document_id=document_id,
+            s3_key_redacted=s3_keys["s3_key_redacted"],
+            context=context,
+        )
+
         elapsed_ms = int((time.time() - start_time) * 1000)
 
         # Actualizar DynamoDB con status=COMPLETED y estadísticas
@@ -230,6 +241,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 "entities_by_type": result.entities_by_type,
                 "processing_time_ms": elapsed_ms,
                 "engine": engine,
+                "macie_status": macie_status,
             },
             dynamodb_resource=dynamodb_resource,
         )
@@ -265,6 +277,47 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             error_message=error_msg,
             processing_time_ms=elapsed_ms,
         )
+
+
+def _maybe_verify_with_macie(
+    user_id: str,
+    document_id: str,
+    s3_key_redacted: str,
+    context: Any,
+) -> str:
+    """Lanza la verificación Macie si el usuario la habilitó.
+
+    Lee el flag `macieVerification` de la config del usuario. Si está activo,
+    solicita a Macie un escaneo del documento ofuscado. Resiliente: cualquier
+    fallo deja el estado en UNAVAILABLE sin romper la redacción.
+
+    Args:
+        user_id: ID del usuario propietario.
+        document_id: ID del documento.
+        s3_key_redacted: Key S3 del PDF ofuscado.
+        context: Contexto Lambda (para derivar el account id del ARN).
+
+    Returns:
+        Estado de la verificación (DISABLED | REQUESTED | UNAVAILABLE).
+    """
+    if not is_macie_verification_enabled(user_id, DOCUMENTS_TABLE):
+        return MACIE_DISABLED
+
+    account_id = _account_id_from_context(context)
+    return verify_redacted_object(
+        bucket=DOCUMENTS_BUCKET,
+        s3_key=s3_key_redacted,
+        document_id=document_id,
+        account_id=account_id,
+    )
+
+
+def _account_id_from_context(context: Any) -> str:
+    """Deriva el AWS account id desde el ARN de la función Lambda."""
+    arn = getattr(context, "invoked_function_arn", "") or ""
+    parts = arn.split(":")
+    # arn:aws:lambda:region:ACCOUNT_ID:function:name
+    return parts[4] if len(parts) > 4 else ""
 
 
 def _confirm_object_exists(s3_key: str, retries: int = 3) -> None:

@@ -20,6 +20,7 @@ const DETECTION_RESPONSE = {
   data: {
     config: {
       detectionMethod: 'both',
+      macieVerification: false,
       bedrockModelId: 'anthropic.claude-3-haiku-20240307-v1:0',
       bedrockTemperature: 0,
       bedrockPrompt: 'Detectá PII en: {text}',
@@ -45,6 +46,7 @@ function mockGet() {
 describe('validateDetectionConfig', () => {
   const base = {
     detectionMethod: 'both' as const,
+    macieVerification: false,
     bedrockModelId: 'anthropic.claude-3-haiku-20240307-v1:0',
     bedrockTemperature: 0,
     bedrockPrompt: 'Detectá PII en: {text}',

@@ -745,6 +745,9 @@ def handle_update_detection_config(event: dict[str, Any]) -> dict[str, Any]:
         "detectionMethod": body.get(
             "detectionMethod", defaults["detectionMethod"]
         ),
+        "macieVerification": body.get(
+            "macieVerification", defaults["macieVerification"]
+        ),
         "bedrockModelId": body.get("bedrockModelId", defaults["bedrockModelId"]),
         "bedrockTemperature": body.get(
             "bedrockTemperature", defaults["bedrockTemperature"]

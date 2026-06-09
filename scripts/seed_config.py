@@ -29,6 +29,7 @@ item = {
     "SK": SK_DETECTION,
     "userId": username,
     "detectionMethod": cfg["detectionMethod"],
+    "macieVerification": cfg["macieVerification"],
     "bedrockModelId": cfg["bedrockModelId"],
     "bedrockTemperature": Decimal(str(cfg["bedrockTemperature"])),
     "bedrockPrompt": cfg["bedrockPrompt"],

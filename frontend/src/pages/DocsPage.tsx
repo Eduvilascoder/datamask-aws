@@ -243,7 +243,7 @@ const DocsPage: React.FC = () => {
 
           <ExpandableSection headerText="Versión">
             <Box variant="p">
-              <Badge color="blue">DataMask AWS v2.0</Badge> · Desarrollado por EduTheCoder.
+              <Badge color="blue">DataMask AWS v1.1</Badge> · Desarrollado por EduTheCoder.
             </Box>
           </ExpandableSection>
         </SpaceBetween>

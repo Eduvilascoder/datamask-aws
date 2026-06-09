@@ -42,6 +42,11 @@ VALID_DETECTION_METHODS = frozenset(
 )
 DEFAULT_DETECTION_METHOD = DETECTION_METHOD_BOTH
 
+# Verificación adicional con Amazon Macie (segunda capa de protección):
+# tras ofuscar, lanza un escaneo de Macie sobre el documento ofuscado para
+# detectar PII residual. Opcional (desactivado por defecto por su costo).
+DEFAULT_MACIE_VERIFICATION = False
+
 # Temperatura por defecto del modelo (0.0 = determinista, recomendado para
 # extracción precisa de PII). Configurable por el usuario en [0.0, 1.0].
 DEFAULT_BEDROCK_TEMPERATURE = 0.0
@@ -254,6 +259,7 @@ def default_detection_config() -> dict[str, Any]:
     """Devuelve la configuración de detección por defecto."""
     return {
         "detectionMethod": DEFAULT_DETECTION_METHOD,
+        "macieVerification": DEFAULT_MACIE_VERIFICATION,
         "bedrockModelId": DEFAULT_BEDROCK_MODEL_ID,
         "bedrockTemperature": DEFAULT_BEDROCK_TEMPERATURE,
         "bedrockPrompt": DEFAULT_BEDROCK_PROMPT,
@@ -278,6 +284,11 @@ def validate_detection_config(config: dict[str, Any]) -> tuple[bool, str]:
 
     uses_ai = method in (DETECTION_METHOD_AI, DETECTION_METHOD_BOTH)
     uses_regex = method in (DETECTION_METHOD_REGEX, DETECTION_METHOD_BOTH)
+
+    # Verificación Macie: booleano opcional.
+    macie = config.get("macieVerification", DEFAULT_MACIE_VERIFICATION)
+    if not isinstance(macie, bool):
+        return False, "macieVerification debe ser verdadero o falso"
 
     model_id = config.get("bedrockModelId", "")
     if not isinstance(model_id, str) or not model_id.strip():
@@ -377,6 +388,9 @@ def get_detection_config(
         "detectionMethod": item.get(
             "detectionMethod", defaults["detectionMethod"]
         ),
+        "macieVerification": bool(
+            item.get("macieVerification", defaults["macieVerification"])
+        ),
         "bedrockModelId": item.get("bedrockModelId", defaults["bedrockModelId"]),
         "bedrockTemperature": float(raw_temp),
         "bedrockPrompt": item.get("bedrockPrompt", defaults["bedrockPrompt"]),
@@ -400,6 +414,9 @@ def save_detection_config(
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "detectionMethod": config.get(
             "detectionMethod", DEFAULT_DETECTION_METHOD
+        ),
+        "macieVerification": bool(
+            config.get("macieVerification", DEFAULT_MACIE_VERIFICATION)
         ),
         "bedrockModelId": config["bedrockModelId"],
         "bedrockTemperature": Decimal(str(config.get("bedrockTemperature", DEFAULT_BEDROCK_TEMPERATURE))),

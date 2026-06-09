@@ -170,7 +170,8 @@ usa de forma transparente. El **id token (JWT)** autoriza el API mediante un
 | Redacción | Solo ofusca entidades detectadas (regex configurable + IA) |
 | Salida PDF | `ofuscados/{userId}/{docId}/{stem}_ofuscado.pdf` |
 | Salida MD | `ofuscados/{userId}/{docId}/{stem}_informe.md` |
-| Estado final | `COMPLETED` con estadísticas (entitiesFound, entitiesByType, processingTimeMs) |
+| Verificación Macie | Opcional (config `macieVerification`): tras confirmar el PDF ofuscado en S3, crea un classification job ONE_TIME de Macie acotado al prefijo del documento. Asíncrono y resiliente; estado en `macie_status` (`DISABLED`/`REQUESTED`/`UNAVAILABLE`). No bloquea el pipeline |
+| Estado final | `COMPLETED` con estadísticas (entitiesFound, entitiesByType, processingTimeMs, macieStatus) |
 | Sin entidades | Si no se detectan entidades, no genera archivo ofuscado |
 
 ### 4. Consulta y Descarga
@@ -181,7 +182,7 @@ usa de forma transparente. El **id token (JWT)** autoriza el API mediante un
 | `/documents/{id}` | GET | Detalle de un documento con estadísticas |
 | `/documents/{id}/download/pdf` | GET | Presigned URL para PDF ofuscado (5min) |
 | `/documents/{id}/download/markdown` | GET | Presigned URL para informe MD (5min) |
-| `/config/detection` | GET | Configuración de detección (método, modelo, temperatura, prompt, regex, ignorar) |
+| `/config/detection` | GET | Configuración de detección (método, verificación Macie, modelo, temperatura, prompt, regex, ignorar) |
 | `/config/detection` | PUT | Actualizar configuración de detección |
 | `/config/models` | GET | Lista de modelos de Bedrock disponibles |
 

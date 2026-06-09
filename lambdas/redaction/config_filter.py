@@ -38,6 +38,46 @@ PII_TYPE_MAPPING: dict[str, str] = {
 DEFAULT_CONFIG: dict[str, bool] = {key: True for key in PII_TYPE_MAPPING}
 
 
+def is_macie_verification_enabled(
+    user_id: str,
+    table_name: str,
+    dynamodb_resource: Any = None,
+) -> bool:
+    """Indica si el usuario habilitó la verificación con Macie.
+
+    Lee el flag `macieVerification` de la config de detección
+    (PK=USER#{userId}, SK=CONFIG#DETECTION). Fail-safe a False: si no existe
+    o falla la lectura, la verificación NO se solicita.
+
+    Args:
+        user_id: ID del usuario propietario del documento.
+        table_name: Nombre de la tabla DynamoDB.
+        dynamodb_resource: Recurso boto3 (inyectable para tests).
+
+    Returns:
+        True si la verificación Macie está habilitada, False si no.
+    """
+    if not user_id or not table_name:
+        return False
+
+    if dynamodb_resource is None:
+        dynamodb_resource = boto3.resource("dynamodb")
+
+    try:
+        table = dynamodb_resource.Table(table_name)
+        response = table.get_item(
+            Key={"PK": f"USER#{user_id}", "SK": "CONFIG#DETECTION"}
+        )
+    except Exception:
+        logger.exception("Error leyendo flag macieVerification — usando False")
+        return False
+
+    item = response.get("Item")
+    if not item:
+        return False
+    return bool(item.get("macieVerification", False))
+
+
 def get_active_types(
     user_id: str,
     table_name: str,

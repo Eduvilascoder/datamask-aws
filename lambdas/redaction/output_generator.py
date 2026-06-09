@@ -287,6 +287,7 @@ def update_document_completed(
                 "entitiesByType = :entities_by_type, "
                 "processingTimeMs = :processing_time_ms, "
                 "#engine = :engine, "
+                "macieStatus = :macie_status, "
                 "completedAt = :completed_at"
             ),
             ExpressionAttributeNames={
@@ -301,6 +302,7 @@ def update_document_completed(
                 ":entities_by_type": stats.get("entities_by_type", {}),
                 ":processing_time_ms": stats.get("processing_time_ms", 0),
                 ":engine": stats.get("engine", ""),
+                ":macie_status": stats.get("macie_status", "DISABLED"),
                 ":completed_at": completed_at,
             },
         )

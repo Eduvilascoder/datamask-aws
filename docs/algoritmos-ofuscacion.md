@@ -234,6 +234,48 @@ se genera archivo ofuscado.
 
 ---
 
+## 4b. Verificación con Amazon Macie (segunda capa, opcional)
+
+Como **defensa en profundidad**, DataMask puede ejecutar una verificación
+independiente con **Amazon Macie** sobre el documento ya ofuscado. Es una capa
+**opcional** que se activa por usuario desde **Configuración**
+(`macieVerification`); viene **desactivada por defecto** por su costo.
+
+### Cómo funciona
+
+1. Tras confirmar que el PDF ofuscado quedó escrito en S3, la Lambda de
+   redacción lee el flag `macieVerification` del usuario.
+2. Si está activo, crea un **classification job ONE_TIME** de Macie acotado al
+   **prefijo del documento ofuscado** (`ofuscados/{userId}/{docId}/`), nunca a
+   los originales.
+3. El job es **asíncrono**: la redacción registra el estado de la verificación
+   en la auditoría (`macieStatus`) y continúa sin bloquear.
+
+### Estados (`macieStatus`)
+
+| Estado | Significado |
+|--------|-------------|
+| `DISABLED` | El usuario no habilitó la verificación. |
+| `REQUESTED` | El job de Macie se creó correctamente. |
+| `UNAVAILABLE` | Macie no está habilitado en la cuenta o falló al crear el job. |
+
+### Diseño resiliente
+
+Si Macie no está habilitado, faltan permisos o la API falla, la verificación
+queda en `UNAVAILABLE` y **la ofuscación se considera completada igual** — la
+verificación es complementaria, no un gate del pipeline.
+
+### Limitaciones
+
+- **Macie no hace OCR.** Analiza texto extraíble; para PDFs-imagen escaneados,
+  la confianza sigue recayendo en Textract + IA + regex.
+- **No es en tiempo real.** El job corre de forma asíncrona; los hallazgos se
+  revisan luego en la consola de Macie o vía EventBridge/Security Hub.
+- **Costo.** Macie cobra por GB analizado. Ver
+  [`pricing-estimado.md`](pricing-estimado.md).
+
+---
+
 ## 5. Resumen comparativo
 
 | Aspecto | Motor IA (Bedrock) | Motor Regex |

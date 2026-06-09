@@ -56,7 +56,7 @@ const AppContent: React.FC = () => {
             <SpaceBetween size="xxxs">
               <Box variant="h2" color="text-status-info">DataMask AWS</Box>
               <Box variant="small" color="text-body-secondary">Enmascarar datos sensibles en PDFs</Box>
-              <Box fontSize="body-s" color="text-status-inactive">v1.0.0</Box>
+              <Box fontSize="body-s" color="text-status-inactive">v1.1.0</Box>
             </SpaceBetween>
           </Box>
           <SideNavigation

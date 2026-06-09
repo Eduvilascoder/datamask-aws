@@ -355,6 +355,19 @@ Abrí `https://main.d3nxh77gcdsvjs.amplifyapp.com/` (Cmd+Shift+R) y probá el lo
 En **Configuración** (UI), sin redesplegar:
 - **Método de detección:** qué motores se aplican — `ai` (solo IA), `regex`
   (solo reglas regex) o `both` (ambos, fusionados). Por defecto `both`.
+- **Verificación con Amazon Macie (2da capa):** opcional, desactivada por
+  defecto. Si se activa, tras ofuscar se lanza un escaneo de Macie sobre el
+  documento ofuscado para detectar PII residual. Requiere Macie habilitado en la
+  cuenta; si no lo está, la verificación se omite sin romper el pipeline.
+- **Verificación con Macie:** segunda capa opcional que, tras ofuscar, escanea
+  el documento con Amazon Macie para detectar PII residual. Desactivada por
+  defecto (su activación añade costo). Si está habilitada, la Lambda de
+  redacción crea un classification job ONE_TIME de Macie acotado al prefijo del
+  documento ofuscado tras subirlo a S3. El job es asíncrono y resiliente: no
+  bloquea ni rompe el pipeline (si Macie no está habilitado o falla, el estado
+  queda en `UNAVAILABLE`). El estado de la verificación (`DISABLED` |
+  `REQUESTED` | `UNAVAILABLE`) se persiste en DynamoDB (`macie_status`); los
+  hallazgos se consultan luego vía la consola de Macie / EventBridge.
 - **Modelo de IA:** modelo de Bedrock a usar.
 - **Temperatura:** aleatoriedad del modelo (0 = determinista; rango 0–1).
 - **Prompt:** editable; debe incluir el marcador `{text}`.

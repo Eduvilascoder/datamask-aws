@@ -31,6 +31,7 @@ type DetectionMethod = 'ai' | 'regex' | 'both';
 /** Configuración avanzada de detección. */
 interface DetectionConfig {
   detectionMethod: DetectionMethod;
+  macieVerification: boolean;
   bedrockModelId: string;
   bedrockTemperature: number;
   bedrockPrompt: string;
@@ -248,20 +249,38 @@ const ConfigPage: React.FC = () => {
       {detection && (
         <>
           <Container header={<Header variant="h2" description="Elija qué algoritmos se aplican para detectar y ofuscar datos sensibles.">Método de ofuscación</Header>}>
-            <FormField
-              label="Método"
-              description="IA usa Amazon Bedrock (contextual); Regex usa reglas deterministas; Ambos combina los dos motores."
-            >
-              <Select
-                selectedOption={selectedMethodOption}
-                options={methodOptions}
-                onChange={({ detail }) =>
-                  updateDetection({
-                    detectionMethod: (detail.selectedOption.value as DetectionMethod) ?? 'both',
-                  })
-                }
-              />
-            </FormField>
+            <SpaceBetween size="l">
+              <FormField
+                label="Método"
+                description="IA usa Amazon Bedrock (contextual); Regex usa reglas deterministas; Ambos combina los dos motores."
+              >
+                <Select
+                  selectedOption={selectedMethodOption}
+                  options={methodOptions}
+                  onChange={({ detail }) =>
+                    updateDetection({
+                      detectionMethod: (detail.selectedOption.value as DetectionMethod) ?? 'both',
+                    })
+                  }
+                />
+              </FormField>
+
+              <FormField
+                label="Verificación con Amazon Macie (segunda capa)"
+                description="Tras ofuscar, Macie escanea el documento resultante para detectar PII residual como medida de protección adicional. Requiere Amazon Macie habilitado en la cuenta. Puede generar costos adicionales por GB analizado."
+              >
+                <Toggle
+                  checked={detection.macieVerification}
+                  onChange={({ detail }) =>
+                    updateDetection({ macieVerification: detail.checked })
+                  }
+                >
+                  {detection.macieVerification
+                    ? 'Verificación Macie habilitada'
+                    : 'Verificación Macie deshabilitada'}
+                </Toggle>
+              </FormField>
+            </SpaceBetween>
           </Container>
 
           {showAi && (

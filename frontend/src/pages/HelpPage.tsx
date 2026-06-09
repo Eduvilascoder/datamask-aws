@@ -170,7 +170,7 @@ const HelpPage: React.FC = () => {
           <ExpandableSection headerText="Acerca de">
             <SpaceBetween size="s">
               <Box variant="p">
-                <strong>DataMask AWS v2.0</strong>
+                <strong>DataMask AWS v1.1</strong>
               </Box>
               <Box variant="p">
                 Solución serverless para enmascarar datos sensibles (PII) en documentos.

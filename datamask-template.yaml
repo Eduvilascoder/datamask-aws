@@ -633,6 +633,16 @@ Resources:
                 Action:
                   - 'sqs:SendMessage'
                 Resource: !GetAtt DeadLetterQueue.Arn
+        # Verificación opcional con Amazon Macie (2da capa). Macie no soporta
+        # permisos a nivel de recurso para crear jobs — Resource '*' obligatorio.
+        - PolicyName: MacieVerification
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'macie2:CreateClassificationJob'
+                Resource: '*'
       Tags:
         - Key: Project
           Value: !Ref ProjectTag

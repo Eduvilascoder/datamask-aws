@@ -2,7 +2,7 @@
 
 **Detección y ofuscación de datos sensibles en documentos PDF — 100% serverless en AWS**
 
-![Version](https://img.shields.io/badge/version-2.0-blue)
+![Version](https://img.shields.io/badge/version-1.1-blue)
 ![Python](https://img.shields.io/badge/python-3.12-green)
 ![AWS](https://img.shields.io/badge/AWS-CloudFormation-orange)
 ![Serverless](https://img.shields.io/badge/architecture-serverless-purple)
@@ -16,6 +16,7 @@ DataMask AWS detecta y enmascara automáticamente datos personales sensibles (PI
 - 🇦🇷 **Formatos argentinos** — DNI, CUIT/CUIL, pasaportes, teléfonos +54
 - 📄 **Redacción visual** — reemplaza PII por etiquetas `[TIPO]` conservando formato
 - ⚙️ **Detección configurable** — método (IA, regex o ambos), modelo de IA, temperatura, prompt y reglas regex editables desde la UI
+- 🛡️ **Verificación opcional con Amazon Macie** — segunda capa que escanea el documento ofuscado en busca de PII residual (activable desde Configuración)
 - 🔐 **Login federado** — Amazon Cognito federado con AWS IAM Identity Center (SAML)
 - 📊 **Observabilidad** — CloudWatch Alarms + SNS para alertas en tiempo real
 - 🔒 **Seguro por diseño** — cifrado KMS, IAM mínimo privilegio, TLS 1.2+
@@ -190,4 +191,4 @@ ambos algoritmos, la fusión y la resolución de solapamientos está en
 
 ---
 
-**DataMask AWS v2.0** — by [EduTheCoder](https://github.com/Eduvilascoder)
+**DataMask AWS v1.1** — by [EduTheCoder](https://github.com/Eduvilascoder)

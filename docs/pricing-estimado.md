@@ -157,6 +157,26 @@ Textract + Bedrock + (poco) Lambda/S3.
 
 ---
 
+## Verificación opcional con Amazon Macie (segunda capa)
+
+La verificación con Macie está **desactivada por defecto** y se activa por
+usuario desde Configuración. Si se habilita, suma un costo aparte:
+
+- **Sensitive data discovery (jobs):** Macie cobra por **GB analizado**. Los PDFs
+  ofuscados suelen ser livianos (cientos de KB), pero a alto volumen el costo de
+  los jobs puede superar al del resto del pipeline.
+- **Costo orientativo:** para el escenario base (~500 páginas, < 1 GB/mes
+  analizado) el impacto es de pocos dólares al mes; a 10.000 PDFs puede pasar a
+  decenas de dólares según el tamaño de los documentos.
+- **Recomendación:** activarla solo para flujos que requieran aseguramiento
+  adicional, o usar el **automated sensitive data discovery** de Macie (muestreo
+  continuo de bajo costo) en lugar de jobs por documento.
+
+> Validá el precio vigente en la página de precios de Amazon Macie para tu
+> región y volumen reales. Contenido reformulado por cumplimiento de licencia.
+
+---
+
 ## Palancas de costo (cómo optimizar)
 
 1. **Modelo de IA (la palanca #1).** Haiku 4.5 es económico. Modelos más
