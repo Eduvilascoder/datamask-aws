@@ -32,6 +32,9 @@ from botocore.exceptions import ClientError
 from config import AppConfig, load_config
 from middleware import authenticate_request, get_user_id
 import detection_config
+import macie_findings
+import macie_jobs
+import notifications
 from responses import bad_request, build_response, forbidden, internal_error
 
 logger = logging.getLogger()
@@ -187,6 +190,10 @@ def route_request(
         return handle_update_detection_config(event)
     if path == "/config/models" and method == "GET":
         return handle_get_models(event)
+    if path == "/macie/findings" and method == "GET":
+        return handle_get_macie_findings(event)
+    if path == "/macie/jobs" and method == "POST":
+        return handle_create_macie_jobs(event)
 
     # Req 11.6: HTTP 403 genérico sin revelar existencia del recurso
     return forbidden()
@@ -729,6 +736,86 @@ def handle_get_detection_config(event: dict[str, Any]) -> dict[str, Any]:
     })
 
 
+def handle_get_macie_findings(event: dict[str, Any]) -> dict[str, Any]:
+    """Devuelve los hallazgos de Amazon Macie del usuario actual.
+
+    Para la pantalla "Monitoreo PII — Macie". Si Macie no está habilitado en
+    la cuenta, responde con macieEnabled=false y un mensaje explicativo.
+    """
+    user_id = get_user_id(event)
+    if not user_id:
+        return forbidden()
+
+    config = get_config()
+    try:
+        result = macie_findings.get_macie_findings(
+            user_id=user_id,
+            bucket=config.documents_bucket,
+        )
+    except Exception:
+        logger.exception("Error obteniendo hallazgos de Macie")
+        return internal_error()
+
+    return build_response(200, result)
+
+
+def _account_id_from_bucket(bucket: str) -> str:
+    """Deriva el account id del nombre del bucket (datamask-{env}-documents-{id})."""
+    parts = bucket.rsplit("-", 1)
+    return parts[1] if len(parts) == 2 and parts[1].isdigit() else ""
+
+
+def handle_create_macie_jobs(event: dict[str, Any]) -> dict[str, Any]:
+    """Crea los dos jobs de Macie (originales y ofuscados) del usuario.
+
+    Para la sección Configuración. Si Macie no está habilitado, responde con
+    macieEnabled=false y un mensaje explicativo (no es un error).
+    """
+    user_id = get_user_id(event)
+    if not user_id:
+        return forbidden()
+
+    config = get_config()
+    account_id = _account_id_from_bucket(config.documents_bucket)
+    if not account_id:
+        return internal_error()
+
+    try:
+        result = macie_jobs.create_scan_jobs(
+            user_id=user_id,
+            bucket=config.documents_bucket,
+            account_id=account_id,
+        )
+    except Exception:
+        logger.exception("Error creando jobs de Macie")
+        return internal_error()
+
+    # Notificar por SNS si el usuario tiene las alertas habilitadas.
+    if result.get("macieEnabled"):
+        dynamodb = boto3.resource("dynamodb")
+        det = detection_config.get_detection_config(
+            user_id=user_id,
+            table_name=config.documents_table,
+            dynamodb_resource=dynamodb,
+        )
+        created = [j for j in result.get("jobs", []) if j["status"] == "CREATED"]
+        if created:
+            notifications.publish_alert(
+                subject=f"DataMask: {len(created)} job(s) de Macie iniciado(s)",
+                message=(
+                    f"El usuario {user_id} inició {len(created)} job(s) de "
+                    "Amazon Macie para escanear PII:\n"
+                    + "\n".join(
+                        f"- [{j['scope']}] {j['prefix']} (jobId: {j['jobId']})"
+                        for j in created
+                    )
+                ),
+                enabled=bool(det.get("snsAlertsEnabled", True)),
+            )
+
+    return build_response(200, result)
+
+
 def handle_update_detection_config(event: dict[str, Any]) -> dict[str, Any]:
     """Actualiza la configuración avanzada de detección del usuario."""
     user_id = get_user_id(event)
@@ -747,6 +834,9 @@ def handle_update_detection_config(event: dict[str, Any]) -> dict[str, Any]:
         ),
         "macieVerification": body.get(
             "macieVerification", defaults["macieVerification"]
+        ),
+        "snsAlertsEnabled": body.get(
+            "snsAlertsEnabled", defaults["snsAlertsEnabled"]
         ),
         "bedrockModelId": body.get("bedrockModelId", defaults["bedrockModelId"]),
         "bedrockTemperature": body.get(

@@ -21,6 +21,7 @@ const DETECTION_RESPONSE = {
     config: {
       detectionMethod: 'both',
       macieVerification: false,
+      snsAlertsEnabled: true,
       bedrockModelId: 'anthropic.claude-3-haiku-20240307-v1:0',
       bedrockTemperature: 0,
       bedrockPrompt: 'Detectá PII en: {text}',
@@ -47,6 +48,7 @@ describe('validateDetectionConfig', () => {
   const base = {
     detectionMethod: 'both' as const,
     macieVerification: false,
+    snsAlertsEnabled: true,
     bedrockModelId: 'anthropic.claude-3-haiku-20240307-v1:0',
     bedrockTemperature: 0,
     bedrockPrompt: 'Detectá PII en: {text}',

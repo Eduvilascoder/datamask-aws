@@ -741,6 +741,29 @@ Resources:
                   - 'bedrock:ListFoundationModels'
                   - 'bedrock:ListInferenceProfiles'
                 Resource: '*'
+        # Lectura de hallazgos de Macie (pantalla "Monitoreo PII — Macie").
+        # Las APIs de listado/lectura de Macie no soportan permisos a nivel de
+        # recurso — Resource '*' obligatorio (solo acciones de lectura).
+        - PolicyName: MacieReadFindings
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'macie2:GetMacieSession'
+                  - 'macie2:ListFindings'
+                  - 'macie2:GetFindings'
+                  - 'macie2:CreateClassificationJob'
+                Resource: '*'
+        # Publicación de alertas/notificaciones de la app (toggle en Config).
+        - PolicyName: SnsPublishAlerts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sns:Publish'
+                Resource: !Ref AlertsTopic
         - PolicyName: KMSAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -908,6 +931,7 @@ Resources:
           DOCUMENTS_TABLE: !Sub 'datamask-${Environment}-documents'
           ENVIRONMENT: !Ref Environment
           TRIGGER_FUNCTION_NAME: !Sub 'datamask-${Environment}-trigger'
+          ALERTS_TOPIC_ARN: !Ref AlertsTopic
       Tags:
         - Key: Project
           Value: !Ref ProjectTag
@@ -1238,6 +1262,30 @@ Resources:
       RestApiId: !Ref DataMaskApi
       ParentId: !Ref ConfigResource
       PathPart: models
+
+  # /macie
+  MacieResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !GetAtt DataMaskApi.RootResourceId
+      PathPart: macie
+
+  # /macie/findings
+  MacieFindingsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref MacieResource
+      PathPart: findings
+
+  # /macie/jobs
+  MacieJobsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ParentId: !Ref MacieResource
+      PathPart: jobs
 
   # =============================================================================
   # API Gateway — Métodos con Lambda Proxy Integration
@@ -1730,6 +1778,84 @@ Resources:
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
 
+  # GET /macie/findings
+  MacieFindingsGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref MacieFindingsResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # OPTIONS /macie/findings (CORS)
+  MacieFindingsOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref MacieFindingsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # POST /macie/jobs
+  MacieJobsPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref MacieJobsResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiCognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerFunction.Arn}/invocations'
+
+  # OPTIONS /macie/jobs (CORS)
+  MacieJobsOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DataMaskApi
+      ResourceId: !Ref MacieJobsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-Content-Sha256'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
   # =============================================================================
   # API Gateway — Deployment y Stage
   # =============================================================================
@@ -1751,6 +1877,8 @@ Resources:
       - ConfigDetectionGet
       - ConfigDetectionPut
       - ConfigModelsGet
+      - MacieFindingsGet
+      - MacieJobsPost
       - UploadPresignOptions
       - DocumentsOptions
       - DocumentsPurgeOptions
@@ -1762,6 +1890,8 @@ Resources:
       - DocumentsProcessOptions
       - ConfigDetectionOptions
       - ConfigModelsOptions
+      - MacieFindingsOptions
+      - MacieJobsOptions
     Properties:
       RestApiId: !Ref DataMaskApi
       Description: 'Deployment con authorizer Cognito (auth v2)'

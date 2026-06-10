@@ -182,9 +182,11 @@ usa de forma transparente. El **id token (JWT)** autoriza el API mediante un
 | `/documents/{id}` | GET | Detalle de un documento con estadísticas |
 | `/documents/{id}/download/pdf` | GET | Presigned URL para PDF ofuscado (5min) |
 | `/documents/{id}/download/markdown` | GET | Presigned URL para informe MD (5min) |
-| `/config/detection` | GET | Configuración de detección (método, verificación Macie, modelo, temperatura, prompt, regex, ignorar) |
+| `/config/detection` | GET | Configuración de detección (método, verificación Macie, alertas SNS, modelo, temperatura, prompt, regex, ignorar) |
 | `/config/detection` | PUT | Actualizar configuración de detección |
 | `/config/models` | GET | Lista de modelos de Bedrock disponibles |
+| `/macie/findings` | GET | Hallazgos de Amazon Macie del usuario (prefijo `ofuscados/{userId}/`) para la pantalla "Monitoreo PII — Macie"; si Macie no está habilitado responde `macieEnabled=false` con mensaje explicativo |
+| `/macie/jobs` | POST | Crea bajo demanda dos classification jobs ONE_TIME de Macie acotados al usuario: `originales/{userId}/` (scope `ORIGINALES`) y `ofuscados/{userId}/` (scope `OFUSCADOS`). Cada job lleva tags `DataMaskScope` y `DataMaskUser`. Si Macie no está habilitado responde `macieEnabled=false` con mensaje explicativo (no es error) |
 
 ---
 

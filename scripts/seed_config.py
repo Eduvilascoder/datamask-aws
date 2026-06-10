@@ -30,6 +30,7 @@ item = {
     "userId": username,
     "detectionMethod": cfg["detectionMethod"],
     "macieVerification": cfg["macieVerification"],
+    "snsAlertsEnabled": cfg["snsAlertsEnabled"],
     "bedrockModelId": cfg["bedrockModelId"],
     "bedrockTemperature": Decimal(str(cfg["bedrockTemperature"])),
     "bedrockPrompt": cfg["bedrockPrompt"],

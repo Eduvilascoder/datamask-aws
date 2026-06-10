@@ -19,6 +19,7 @@ import OutputPage from './pages/OutputPage';
 import HelpPage from './pages/HelpPage';
 import DocsPage from './pages/DocsPage';
 import AuditPage from './pages/AuditPage';
+import MaciePage from './pages/MaciePage';
 import LoginPage from './pages/LoginPage';
 import { ProcessingProvider } from './context/ProcessingContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -28,6 +29,7 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Documentos a enmascarar', href: '/' },
   { type: 'link', text: 'Archivos ofuscados', href: '/output' },
   { type: 'link', text: es.nav.logs, href: '/audit' },
+  { type: 'link', text: 'Monitoreo PII — Macie', href: '/macie' },
   { type: 'divider' },
   { type: 'link', text: es.nav.config, href: '/config' },
   { type: 'link', text: 'Documentación', href: '/docs' },
@@ -87,6 +89,7 @@ const AppContent: React.FC = () => {
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/output" element={<OutputPage />} />
           <Route path="/audit" element={<AuditPage />} />
+          <Route path="/macie" element={<MaciePage />} />
           <Route path="/docs" element={<DocsPage />} />
           <Route path="/help" element={<HelpPage />} />
         </Routes>

@@ -32,6 +32,7 @@ type DetectionMethod = 'ai' | 'regex' | 'both';
 interface DetectionConfig {
   detectionMethod: DetectionMethod;
   macieVerification: boolean;
+  snsAlertsEnabled: boolean;
   bedrockModelId: string;
   bedrockTemperature: number;
   bedrockPrompt: string;
@@ -86,6 +87,7 @@ const ConfigPage: React.FC = () => {
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [creatingJobs, setCreatingJobs] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [flashMessages, setFlashMessages] = useState<FlashbarProps.MessageDefinition[]>([]);
 
@@ -149,6 +151,28 @@ const ConfigPage: React.FC = () => {
         onDismiss: () => setFlashMessages([]),
       },
     ]);
+  };
+
+  const handleCreateMacieJobs = async () => {
+    setCreatingJobs(true);
+    setFlashMessages([]);
+    try {
+      const res = await authApi.post('/macie/jobs', {});
+      const data = res.data as {
+        macieEnabled: boolean;
+        jobs: Array<{ scope: string; status: string }>;
+        message: string;
+      };
+      if (!data.macieEnabled) {
+        flash('error', data.message || 'Amazon Macie no está habilitado en la cuenta.');
+      } else {
+        flash('success', data.message || 'Jobs de Macie creados.');
+      }
+    } catch {
+      flash('error', 'No se pudieron crear los jobs de Macie.');
+    } finally {
+      setCreatingJobs(false);
+    }
   };
 
   const handleSave = async () => {
@@ -280,6 +304,59 @@ const ConfigPage: React.FC = () => {
                     : 'Verificación Macie deshabilitada'}
                 </Toggle>
               </FormField>
+
+              <FormField
+                label="Alertas y mensajes por Amazon SNS"
+                description="Habilita el envío de notificaciones por email (vía SNS) ante eventos de la aplicación, como la creación de jobs de Macie o fallos de procesamiento."
+              >
+                <Toggle
+                  checked={detection.snsAlertsEnabled}
+                  onChange={({ detail }) =>
+                    updateDetection({ snsAlertsEnabled: detail.checked })
+                  }
+                >
+                  {detection.snsAlertsEnabled
+                    ? 'Alertas SNS habilitadas'
+                    : 'Alertas SNS deshabilitadas'}
+                </Toggle>
+              </FormField>
+            </SpaceBetween>
+          </Container>
+
+          <Container
+            header={
+              <Header
+                variant="h2"
+                description="Crea dos jobs de Amazon Macie para escanear PII en sus documentos: uno sobre los originales y otro sobre los ofuscados. Los hallazgos se diferencian por alcance y se ven en Monitoreo PII — Macie."
+                actions={
+                  <Button
+                    iconName="search"
+                    onClick={handleCreateMacieJobs}
+                    loading={creatingJobs}
+                  >
+                    Crear jobs de Macie
+                  </Button>
+                }
+              >
+                Escaneo de buckets con Macie
+              </Header>
+            }
+          >
+            <SpaceBetween size="s">
+              <Box variant="p" color="text-body-secondary">
+                Se crearán dos jobs ONE_TIME de Macie acotados a sus carpetas:
+              </Box>
+              <Box variant="p">
+                • <strong>Originales</strong> — escanea <code>originales/</code> (datos sin ofuscar).
+              </Box>
+              <Box variant="p">
+                • <strong>Ofuscados</strong> — escanea <code>ofuscados/</code> (resultado ofuscado, verificación de PII residual).
+              </Box>
+              <Box variant="small" color="text-status-info">
+                Requiere Amazon Macie habilitado en la cuenta. Cada job lleva un
+                tag <code>DataMaskScope</code> (ORIGINALES / OFUSCADOS) para
+                diferenciar los hallazgos en la consola de Macie.
+              </Box>
             </SpaceBetween>
           </Container>
 

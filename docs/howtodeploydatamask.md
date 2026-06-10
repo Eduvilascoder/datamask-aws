@@ -359,6 +359,14 @@ En **Configuración** (UI), sin redesplegar:
   defecto. Si se activa, tras ofuscar se lanza un escaneo de Macie sobre el
   documento ofuscado para detectar PII residual. Requiere Macie habilitado en la
   cuenta; si no lo está, la verificación se omite sin romper el pipeline.
+- **Alertas por Amazon SNS:** activadas por defecto. Habilitan el envío de
+  notificaciones por email (vía SNS) ante eventos de la app (creación de jobs de
+  Macie, fallos de procesamiento).
+- **Escaneo de buckets con Macie:** botón "Crear jobs de Macie" que crea dos
+  jobs ONE_TIME diferenciados: uno sobre `originales/{usuario}/` y otro sobre
+  `ofuscados/{usuario}/`. Cada job lleva el tag `DataMaskScope`
+  (`ORIGINALES` / `OFUSCADOS`) para distinguir los hallazgos en la consola de
+  Macie y en la pantalla "Monitoreo PII — Macie".
 - **Verificación con Macie:** segunda capa opcional que, tras ofuscar, escanea
   el documento con Amazon Macie para detectar PII residual. Desactivada por
   defecto (su activación añade costo). Si está habilitada, la Lambda de
@@ -374,3 +382,6 @@ En **Configuración** (UI), sin redesplegar:
 - **Reglas regex deterministas:** DNI, CUIT/CUIL, email, teléfonos, tarjetas,
   cuentas bancarias (AR/US), etc. Activables individualmente.
 - **Entidades a ignorar:** valores literales que nunca se ofuscan.
+- **Alertas SNS:** habilita o deshabilita el envío de notificaciones vía Amazon
+  SNS (fallos de procesamiento, creación de jobs de Macie, etc.). Activado por
+  defecto (`snsAlertsEnabled`).
